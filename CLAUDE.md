@@ -95,6 +95,14 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Verified vs unverified
 
+**Changed on 2026-11-16 (1.4.0, favourites only keeps the main page + smaller caches):**
+- `favoritesOnly` no longer replaces the main page with the favourites list (the user wants the normal main page, with search and the Favorites category, minus the featured categories).
+  - Desktop: three replacements in the `"hideFavoritesTile:"` module's categories component `k`: `componentDidMount` only fetches trending when `$self.needsCategories(...)`, `getData` uses `$self.featured(trendingCategories)` (a stable empty array when on), and `renderContent` shows the loading skeleton only when `needsCategories`. The old `frontPage` patch is gone. Regexes were tested against a hand-minified copy of the chunk.
+  - Mobile: the `GIFPickerCategoriesPage` patch renders one row with Discord's `GIFPickerCategoryView` for `props.favoritesCategory` (same row height and gutter as Discord's page) and empty spacers, or a hint text when there's no favourites category. Discord's page would pad to 20 rows of grey skeletons with only one category, so it isn't reused.
+- Memory, measured in Bun with full caches: `loaded` 0.26 MB (1000), `failed` 0.11 MB, `apiPreviews` 2.1 MB → 0.5 MB (now an LRU of 1200 instead of a Map cleared at 3000), Tenor pages 2.5 MB for 5000 favourites (only grows with favourites, unchanged), Klipy: unrelated search results go to an unsaved LRU of 500 and move to the saved cache only when a favourite uses one (40 lookups saved 2040 entries before, 40 now).
+- Desktop still frames were the big one: up to 300 full-size bitmaps (about 40 to 200 MB). `LruCache` now takes an optional `weigh`; frames are captured with `createImageBitmap` resize to cover the tile in device pixels and limited to 24 MB. Evicted canvases are zero-sized to free them.
+- `LoadedCache` values are timestamps (numbers) instead of objects. `LruCache.set` on an existing key now calls `onEvict` for the replaced value.
+
 **Added on 2026-11-16 (1.3.0, favourites only + faster GIF tab switch):**
 - Desktop `favoritesOnly`: the picker parent (find `"hideFavoritesTile:"`, discrapper `chunks/649529.js`) renders the categories grid `L` when `this.state.resultType` is null, else the results list with favourites data when it's `FAVORITES`. The patch swaps `this.state` in `renderContent` for `$self.frontPage(this.state, hideFavorites, FAVORITES)`. The header still reads the real state, so it keeps the search bar and no back arrow. Typing sets `SEARCH` as before. The regex was checked against a minified copy of the code, not in real Discord.
 - Mobile `favoritesOnly`: patches `type` of the memo `GIFPickerCategoriesPage` default and renders `GIFPickerResultsList` with `useFavoriteGIFsMobile().favorites`, the picker's `onPressGIF` (taken from a context provided by the GIFPicker patch) and a `columnWidth` measured with `onLayout`. Falls back to Discord's page when the picker has `hideFavorites`.
@@ -181,6 +189,8 @@ A preview is only used if it's the same media type as the original (video stays 
 | offscreenMargin | 800 px (mobile: `offscreenBuffer`, 12 items) |
 | cacheSize | 1000 |
 | stillFavorites | off |
+| favoritesOnly | off |
+| fastTabSwitch (mobile only) | on |
 
 Mobile defaults are the same except quality `xs` and no `prioritizeVisible` (always on).
 

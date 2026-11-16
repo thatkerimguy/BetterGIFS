@@ -87,7 +87,7 @@ export default function SettingsComponent({ api: { jsonStorage: storage } }: Pro
                         />
                         <TableSwitchRow
                             label="Favourites only"
-                            subLabel="When you're not searching, show your favourites instead of Trending GIFs and the other featured categories"
+                            subLabel="Hide Trending GIFs and the other featured categories. The GIF tab's main page keeps search and the Favorites category."
                             value={s.favoritesOnly}
                             onValueChange={(favoritesOnly: boolean) => update({ favoritesOnly })}
                         />

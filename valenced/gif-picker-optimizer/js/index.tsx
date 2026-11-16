@@ -37,6 +37,7 @@ const RESULTS_LIST_PATH = "modules/gif_picker/native/GIFPickerResultsList.tsx";
 const PICKER_PATH = "modules/gif_picker/native/GIFPicker.tsx";
 const CATEGORIES_PAGE_PATH = "modules/gif_picker/native/GIFPickerCategoriesPage.tsx";
 const PICKER_UTILS_PATH = "modules/gif_picker/native/GIFPickerUtils.tsx";
+const CATEGORY_VIEW_PATH = "modules/gif_picker/native/GIFPickerCategoryView.tsx";
 
 let logger: DiscordModules.Logger | undefined;
 
@@ -46,7 +47,8 @@ const loaded = new LoadedCache(DefaultSettings.cacheSize);
 /** Preview URLs that failed, never tried again */
 const failed = new BoundedSet<string>(600);
 /** `${quality}:${id|url}` -> low resolution URL from Discord's GIF API */
-const apiPreviews = new Map<string, string>();
+// Only the current results page needs these: 1200 entries is about 12 pages (id + url keys)
+const apiPreviews = new LruCache<string, string>(1200);
 /** Looks up small versions of Klipy favourites (created on start) */
 let klipy: KlipyResolver | undefined;
 
@@ -116,7 +118,6 @@ async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
             oldFormErrors: true,
         });
 
-        if (apiPreviews.size > 3000) apiPreviews.clear();
         for (const r of (Array.isArray(res?.body) ? res.body : []) as GifItem[]) {
             if (!r?.src) continue;
             const low = normalizeUrl(r.src);
@@ -352,27 +353,22 @@ type AnyComponent = (props: any) => ReactNode;
 /** React.memo object: patching `type` changes what every picker renders */
 type Memo = { type: AnyComponent; };
 
-interface PickerProps {
-    inActionSheet?: boolean;
-    hideFavorites?: boolean;
-    onPressGIF?: (item: unknown) => void;
-    selectedGifSrc?: unknown;
-    keyboardDismissMode?: unknown;
-    [k: string]: unknown;
+interface PickerUtils {
+    GIF_PICKER_GUTTER_SPACING?: number;
+    GIF_PICKER_ITEM_ESIMTATED_HEIGHT?: number;
 }
 
-interface PickerUtils {
-    useFavoriteGIFsMobile?: () => { favorites?: unknown[]; };
-    GIF_PICKER_GUTTER_SPACING?: number;
+interface CategoriesPageProps {
+    columns?: number;
+    favoritesCategory?: { type: unknown; name: string; src: string; } | null;
+    onSelectCategory?: (type: unknown, name: string) => void;
+    [k: string]: unknown;
 }
 
 let originalPicker: AnyComponent | undefined;
 let originalCategoriesPage: AnyComponent | undefined;
 let pickerUtils: PickerUtils | undefined;
-let resultsListModule: { default: AnyComponent; } | undefined;
-
-/** Props of the GIF picker around a categories page (for the favourites grid) */
-const PickerContext = createContext<PickerProps | null>(null);
+let categoryViewModule: { default: AnyComponent; } | undefined;
 
 // Rendered as their own components (not called inline), so their hooks don't
 // change the wrapper's hook order when it switches between them.
@@ -385,7 +381,7 @@ const CategoriesPageInner: AnyComponent = p => originalCategoriesPage!(p);
  * freezes until it's done. This renders an empty frame first, so the tab
  * switch shows at once, and builds the picker right after.
  */
-function DeferredPicker({ props }: { props: PickerProps; }) {
+function DeferredPicker({ props }: { props: Record<string, unknown>; }) {
     const { fastTabSwitch } = useSettings();
     const [ready, setReady] = useState(!fastTabSwitch);
 
@@ -409,59 +405,47 @@ function DeferredPicker({ props }: { props: PickerProps; }) {
         };
     }, [ready]);
 
-    return (
-        <PickerContext.Provider value={props}>
-            {ready
-                ? <PickerInner {...props} />
-                : <View style={styles.pickerPlaceholder}><ActivityIndicator /></View>}
-        </PickerContext.Provider>
-    );
+    return ready
+        ? <PickerInner {...props} />
+        : <View style={styles.pickerPlaceholder}><ActivityIndicator /></View>;
 }
 
-/** Shows favourites instead of the featured categories when not searching */
-function CategoriesPage({ props }: { props: { columns?: number; [k: string]: unknown; }; }) {
+/**
+ * The picker's main page, with only the Favorites category: no Trending GIFs or
+ * other featured categories. It also skips their request and animated previews.
+ * Search (all GIFs) and the Favorites category (search inside favourites) work
+ * as normal.
+ */
+function CategoriesPage({ props }: { props: CategoriesPageProps; }) {
     const { favoritesOnly } = useSettings();
-    const picker = useContext(PickerContext);
-    const usable = favoritesOnly
-        && picker != null
-        && picker.hideFavorites !== true
-        && typeof picker.onPressGIF === "function"
-        && typeof pickerUtils?.useFavoriteGIFsMobile === "function"
-        && typeof resultsListModule?.default === "function";
+    const CategoryView = categoryViewModule?.default;
+    if (!favoritesOnly || typeof CategoryView !== "function" || typeof props.onSelectCategory !== "function") {
+        return <CategoriesPageInner {...props} />;
+    }
 
-    if (!usable) return <CategoriesPageInner {...props} />;
-    return <FavoritesGrid columns={props.columns || 2} picker={picker!} />;
-}
-
-function FavoritesGrid({ columns, picker }: { columns: number; picker: PickerProps; }) {
-    const favorites = pickerUtils!.useFavoriteGIFsMobile!()?.favorites ?? [];
-    const [width, setWidth] = useState(0);
+    const columns = Math.max(1, props.columns || 2);
     const gutter = pickerUtils?.GIF_PICKER_GUTTER_SPACING ?? 8;
-    const columnWidth = Math.max(0, (width + gutter) / columns - gutter);
-    const ResultsList = resultsListModule!.default;
+    // Same row height as Discord's categories page
+    const fullHeight = pickerUtils?.GIF_PICKER_ITEM_ESIMTATED_HEIGHT ?? 180;
+    const height = columns > 2 ? fullHeight : fullHeight / 2;
+    const favorites = props.favoritesCategory;
+
+    if (!favorites) {
+        return (
+            <View style={styles.favoritesEmpty}>
+                <Design.Text variant="text-md/medium" color="text-muted">
+                    Search for GIFs above. Tap the star on a GIF to add it to your favourites.
+                </Design.Text>
+            </View>
+        );
+    }
 
     return (
-        <View style={styles.favorites} onLayout={e => setWidth(e.nativeEvent.layout.width)}>
-            {favorites.length === 0
-                ? (
-                    <View style={styles.favoritesEmpty}>
-                        <Design.Text variant="text-md/medium" color="text-muted">
-                            No favourite GIFs yet. Search for a GIF and tap the star to add one.
-                        </Design.Text>
-                    </View>
-                )
-                : width > 0 && (
-                    <ResultsList
-                        columns={columns}
-                        columnWidth={columnWidth}
-                        loading={false}
-                        inActionSheet={picker.inActionSheet ?? true}
-                        resultItems={favorites}
-                        onPressGIF={picker.onPressGIF}
-                        selectedGifSrc={picker.selectedGifSrc}
-                        keyboardDismissMode={picker.keyboardDismissMode}
-                    />
-                )}
+        <View style={styles.favoritesOnly}>
+            <View style={{ height, flexDirection: "row", gap: gutter, paddingBottom: gutter }}>
+                <CategoryView item={favorites} onSelectCategory={props.onSelectCategory} />
+                {Array.from({ length: columns - 1 }, (_, i) => <View key={i} style={styles.flex} />)}
+            </View>
         </View>
     );
 }
@@ -476,7 +460,10 @@ const styles = StyleSheet.create({
         alignItems: "center",
         justifyContent: "center",
     },
-    favorites: {
+    flex: {
+        flex: 1,
+    },
+    favoritesOnly: {
         flex: 1,
     },
     favoritesEmpty: {
@@ -883,7 +870,6 @@ export default plugin<{ jsonStorage: Settings; }>({
             }),
 
             getModuleWithImportedPath<{ default: (props: ResultsListProps) => ReactNode; }>(RESULTS_LIST_PATH, mod => {
-                resultsListModule = mod as { default: AnyComponent; };
                 cleanup(
                     instead(mod, "default", function (this: unknown, args, orig) {
                         return (
@@ -898,6 +884,10 @@ export default plugin<{ jsonStorage: Settings; }>({
 
             getModuleWithImportedPath<PickerUtils>(PICKER_UTILS_PATH, mod => {
                 pickerUtils = mod;
+            }),
+
+            getModuleWithImportedPath<{ default: AnyComponent; }>(CATEGORY_VIEW_PATH, mod => {
+                categoryViewModule = mod;
             }),
 
             getModuleWithImportedPath<{ default: Memo; }>(PICKER_PATH, mod => {

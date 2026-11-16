@@ -8,14 +8,30 @@
  * native image cache instead of downloading again.
  */
 
-/** Least recently used map. `get` and `set` both count as a use. */
+/**
+ * Least recently used map. `get` and `set` both count as a use.
+ *
+ * `max` limits the number of entries, or, when `weigh` is given, their total
+ * weight (for example bytes). The newest entry is always kept, even if it alone
+ * is over the limit.
+ */
 export class LruCache<K, V> {
     private map = new Map<K, V>();
+    private total = 0;
 
-    constructor(public max: number, private onEvict?: (key: K, value: V) => void) { }
+    constructor(
+        public max: number,
+        private onEvict?: (key: K, value: V) => void,
+        private weigh?: (value: V) => number,
+    ) { }
 
     get size() {
         return this.map.size;
+    }
+
+    /** Total weight of the entries (their count without `weigh`) */
+    get weight() {
+        return this.weigh ? this.total : this.map.size;
     }
 
     has(key: K) {
@@ -31,8 +47,14 @@ export class LruCache<K, V> {
     }
 
     set(key: K, value: V) {
-        if (this.map.has(key)) this.map.delete(key);
+        if (this.map.has(key)) {
+            const old = this.map.get(key)!;
+            this.map.delete(key);
+            this.total -= this.weightOf(old);
+            if (old !== value) this.onEvict?.(key, old);
+        }
         this.map.set(key, value);
+        this.total += this.weightOf(value);
         this.trim();
     }
 
@@ -40,6 +62,7 @@ export class LruCache<K, V> {
         if (!this.map.has(key)) return false;
         const value = this.map.get(key)!;
         this.map.delete(key);
+        this.total -= this.weightOf(value);
         this.onEvict?.(key, value);
         return true;
     }
@@ -49,40 +72,42 @@ export class LruCache<K, V> {
         return this.map.entries();
     }
 
-    /** Changes the capacity, evicting the oldest entries if needed */
+    /** Changes the limit, evicting the oldest entries if needed */
     resize(max: number) {
         this.max = max;
         this.trim();
     }
 
     clear() {
-        for (const [k, v] of this.map) this.onEvict?.(k, v);
+        const entries = [...this.map];
         this.map.clear();
+        this.total = 0;
+        for (const [k, v] of entries) this.onEvict?.(k, v);
+    }
+
+    private weightOf(value: V) {
+        return this.weigh ? Math.max(0, this.weigh(value) || 0) : 1;
     }
 
     private trim() {
         const max = Math.max(0, this.max | 0);
-        while (this.map.size > max) {
+        while (this.map.size > 1 && this.weight > max) {
             const [key, value] = this.map.entries().next().value as [K, V];
             this.map.delete(key);
+            this.total -= this.weightOf(value);
             this.onEvict?.(key, value);
         }
     }
 }
 
-/** What we remember about a URL that finished loading */
-export interface LoadedEntry {
-    /** when it finished loading (ms) */
-    at: number;
-}
-
 /**
- * URLs that finished loading. Remembering them lets a tile that comes back on
- * screen skip the queue. Bounded, so huge favourite libraries don't grow it forever.
+ * URLs that finished loading, with when they did (ms). Remembering them lets a
+ * tile that comes back on screen skip the queue. Bounded, so huge favourite
+ * libraries don't grow it forever. Values are plain numbers to keep entries small.
  */
-export class LoadedCache extends LruCache<string, LoadedEntry> {
+export class LoadedCache extends LruCache<string, number> {
     mark(url: string) {
-        this.set(url, { at: Date.now() });
+        this.set(url, Date.now());
     }
 
     /** Whether `url` loaded before. Counts as a use, keeping it cached longer. */

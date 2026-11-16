@@ -9,8 +9,10 @@
  * and picks the result with the same page URL.
  *
  * Results (also misses) are cached and persisted, so each favourite is looked up
- * once. Every search also caches the other results it returned, which often
- * covers more favourites. Lookups run one at a time, spaced out.
+ * once. The other results a search returns are kept in a small in-memory cache
+ * (they sometimes cover another favourite) and only saved once a favourite uses
+ * one, so the saved cache grows with your Klipy favourites, not with every
+ * search result. Lookups run one at a time, spaced out.
  */
 
 import { LruCache } from "./cache";
@@ -30,6 +32,8 @@ export interface KlipyResolverOptions {
 }
 
 const MAX_ENTRIES = 5000;
+/** Other results of recent searches, not saved */
+const MAX_EXTRA_ENTRIES = 500;
 const SEARCH_LIMIT = 50;
 const SPACING_MS = 300;
 const SAVE_DELAY_MS = 2000;
@@ -40,6 +44,8 @@ const SEARCH_TIMEOUT_MS = 8000;
 export class KlipyResolver {
     /** `${format}|${pageKey}` -> low resolution URL, or "" when the search didn't find it */
     private cache = new LruCache<string, string>(MAX_ENTRIES);
+    /** Same keys as `cache`, for results of searches made for other favourites */
+    private extra = new LruCache<string, string>(MAX_EXTRA_ENTRIES);
     private pending = new Map<string, Promise<string | null>>();
     private chain: Promise<unknown> = Promise.resolve();
     private saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -75,7 +81,7 @@ export class KlipyResolver {
         if (!pageUrl) return null;
         let missed = false;
         for (const f of formats) {
-            const v = this.cache.get(this.key(f, pageUrl));
+            const v = this.lookup(this.key(f, pageUrl));
             if (v) return v;
             if (v === "") missed = true;
             else return undefined;
@@ -95,7 +101,7 @@ export class KlipyResolver {
         const run = this.chain.then(async () => {
             await Promise.race([this.loaded, wait(LOAD_TIMEOUT_MS)]);
             for (const format of formats) {
-                const cached = this.cache.get(this.key(format, pageUrl));
+                const cached = this.lookup(this.key(format, pageUrl));
                 if (cached) return cached;
                 if (cached === "") continue;
                 try {
@@ -130,12 +136,24 @@ export class KlipyResolver {
         for (const r of results ?? []) {
             if (!r?.url || !r.src) continue;
             const low = normalizeUrl(r.src);
-            this.cache.set(this.key(format, r.url), low);
             if (pageKey(r.url) === want) hit = low;
+            else if (!this.cache.has(this.key(format, r.url))) this.extra.set(this.key(format, r.url), low);
         }
-        if (!hit) this.cache.set(this.key(format, pageUrl), "");
+        this.cache.set(this.key(format, pageUrl), hit ?? "");
         this.scheduleSave();
         return hit;
+    }
+
+    /** Cached answer for `key`. One found among other searches' results is moved into the saved cache. */
+    private lookup(key: string): string | undefined {
+        const saved = this.cache.get(key);
+        if (saved !== undefined) return saved;
+        const other = this.extra.get(key);
+        if (other === undefined) return undefined;
+        this.extra.delete(key);
+        this.cache.set(key, other);
+        this.scheduleSave();
+        return other;
     }
 
     private scheduleSave() {

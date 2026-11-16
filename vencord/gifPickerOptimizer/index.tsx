@@ -102,7 +102,7 @@ const settings = definePluginSettings({
     },
     favoritesOnly: {
         type: OptionType.BOOLEAN,
-        description: "When you're not searching, show your favourites instead of Trending GIFs and the other featured categories",
+        description: "Hide Trending GIFs and the other featured categories. The picker's main page keeps search and the Favorites category.",
         default: false,
     },
 });
@@ -117,7 +117,10 @@ const loaded = new LoadedCache(1000);
 /** Preview URLs that failed, never tried again */
 const failed = new BoundedSet<string>(600);
 /** `${quality}:${id|url}` -> low resolution URL from Discord's GIF API */
-const apiPreviews = new Map<string, string>();
+// Only the current results page needs these: 1200 entries is about 12 pages (id + url keys)
+const apiPreviews = new LruCache<string, string>(1200);
+/** Stable empty list, so memoized category data doesn't change on every render */
+const NO_CATEGORIES: never[] = [];
 /** Looks up small versions of Klipy favourites */
 const KLIPY_STORE_KEY = "GifPickerOptimizer_klipyPreviews";
 let klipy: KlipyResolver | undefined;
@@ -130,10 +133,20 @@ function drop(t: Ticket | null) {
     queue.cancel(t);
 }
 
-/** First frames captured for still favourites, by URL */
-const frames = new LruCache<string, ImageBitmap | HTMLCanvasElement>(300, (_, frame) => {
-    if ("close" in frame) frame.close();
-});
+/**
+ * First frames captured for still favourites, by URL. Frames are decoded
+ * bitmaps (4 bytes per pixel), so they're captured at tile size and limited by
+ * bytes: 24 MB is about 150 tiles at 1x, or 40 at 2x.
+ */
+const FRAME_BUDGET_BYTES = 24 * 1024 * 1024;
+const frames = new LruCache<string, ImageBitmap | HTMLCanvasElement>(
+    FRAME_BUDGET_BYTES,
+    (_, frame) => {
+        if ("close" in frame) frame.close();
+        else frame.width = frame.height = 0;
+    },
+    frame => frame.width * frame.height * 4,
+);
 
 interface GifItem {
     id?: string;
@@ -176,7 +189,6 @@ async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
             oldFormErrors: true,
         });
 
-        if (apiPreviews.size > 3000) apiPreviews.clear();
         for (const r of (res?.body ?? []) as GifItem[]) {
             if (!r?.src) continue;
             const low = normalizeUrl(r.src);
@@ -490,8 +502,19 @@ function drawCover(canvas: HTMLCanvasElement, frame: CanvasImageSource & { width
     ctx.drawImage(frame, (cw - w) / 2, (ch - h) / 2, w, h);
 }
 
-/** Loads `url` (image or video) and returns its first frame, cached */
-function captureFrame(url: string, video: boolean, signal: { cancelled: boolean; }): Promise<ImageBitmap | HTMLCanvasElement> {
+/**
+ * Size to keep a `w`×`h` frame at so it still covers a `target` sized tile
+ * (object-fit: cover) without upscaling. Null keeps the natural size.
+ */
+function coverSize(w: number, h: number, target?: { width: number; height: number; }) {
+    if (!w || !h || !target?.width || !target?.height) return null;
+    const scale = Math.min(1, Math.max(target.width / w, target.height / h));
+    if (scale >= 1) return null;
+    return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
+}
+
+/** Loads `url` (image or video) and returns its first frame at about `target` size (device pixels), cached */
+function captureFrame(url: string, video: boolean, signal: { cancelled: boolean; }, target?: { width: number; height: number; }): Promise<ImageBitmap | HTMLCanvasElement> {
     const cached = frames.get(url);
     if (cached) return Promise.resolve(cached);
 
@@ -511,17 +534,20 @@ function captureFrame(url: string, video: boolean, signal: { cancelled: boolean;
         const ready = async () => {
             try {
                 if (signal.cancelled) throw new Error("cancelled");
+                const w = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
+                const h = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight;
+                const size = coverSize(w, h, target);
                 let frame: ImageBitmap | HTMLCanvasElement;
                 try {
-                    frame = await createImageBitmap(el);
+                    frame = await createImageBitmap(el, size
+                        ? { resizeWidth: size.width, resizeHeight: size.height, resizeQuality: "medium" }
+                        : undefined);
                 } catch {
                     // Fall back to copying the frame onto a canvas
-                    const w = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
-                    const h = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight;
                     frame = document.createElement("canvas");
-                    frame.width = w;
-                    frame.height = h;
-                    frame.getContext("2d")!.drawImage(el, 0, 0);
+                    frame.width = size?.width ?? w;
+                    frame.height = size?.height ?? h;
+                    frame.getContext("2d")!.drawImage(el, 0, 0, frame.width, frame.height);
                 }
                 frames.set(url, frame);
                 resolve(frame);
@@ -571,7 +597,12 @@ function StillTile({ viewRef, source, video, loading, showProgress, coords, onCl
     useEffect(() => {
         if (!source.capture) return;
         const signal = { cancelled: false };
-        captureFrame(source.url, video, signal).then(
+        const rect = canvasRef.current?.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const target = rect && rect.width > 0 && rect.height > 0
+            ? { width: Math.round(rect.width * dpr), height: Math.round(rect.height * dpr) }
+            : undefined;
+        captureFrame(source.url, video, signal, target).then(
             frame => {
                 if (signal.cancelled) return;
                 if (canvasRef.current) drawCover(canvasRef.current, frame);
@@ -852,13 +883,27 @@ export default definePlugin({
             },
         },
         {
-            // GIF picker: with no resultType (not searching) it shows the featured
-            // categories grid. "Favourites only" shows the favourites list there instead.
+            // GIF picker main page (categories grid): the Favorites tile plus Trending
+            // GIFs and the featured categories. "Favourites only" keeps just the
+            // Favorites tile, and skips fetching the others.
             find: "hideFavoritesTile:",
-            replacement: {
-                match: /(hideFavorites:(\i)\}=this\.props,\{resultType:(\i)\}=)this\.state(?=;return null==\3\?.{0,300}?\3===(\i\.\i)\.FAVORITES)/,
-                replace: "$1$self.frontPage(this.state,$2,$4.FAVORITES)",
-            },
+            replacement: [
+                {
+                    // Don't fetch trending categories on mount
+                    match: /0===this\.props\.trendingCategories\.length&&/,
+                    replace: "$self.needsCategories(this.props.trendingCategories)&&",
+                },
+                {
+                    // The tiles: [favorites, ...trendingCategories]
+                    match: /(this\.memoizedData\(this\.state\.favoritesTile,)this\.props\.trendingCategories/,
+                    replace: "$1$self.featured(this.props.trendingCategories)",
+                },
+                {
+                    // Shows a loading skeleton while there are no trending categories
+                    match: /(trendingCategories:(\i)\}=this\.props;return )0===\2\.length/,
+                    replace: "$1$self.needsCategories($2)",
+                },
+            ],
         },
     ],
 
@@ -870,10 +915,14 @@ export default definePlugin({
 
     SequentialResult,
 
-    /** The picker state its content renders from: favourites instead of the categories grid */
-    frontPage<S extends { resultType?: unknown; }>(state: S, hideFavorites: boolean | undefined, favorites: unknown): S {
-        if (state?.resultType != null || hideFavorites || favorites == null || !settings.store.favoritesOnly) return state;
-        return { ...state, resultType: favorites };
+    /** Featured categories shown on the picker's main page (none with "Favourites only") */
+    featured<T>(categories: T[]): T[] {
+        return settings.store.favoritesOnly ? NO_CATEGORIES : categories;
+    },
+
+    /** Whether the main page still has to fetch (and wait for) featured categories */
+    needsCategories(categories: unknown[] | undefined): boolean {
+        return !settings.store.favoritesOnly && (categories?.length ?? 0) === 0;
     },
 
     start() {
