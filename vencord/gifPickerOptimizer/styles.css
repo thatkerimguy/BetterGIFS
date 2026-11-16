@@ -1,0 +1,111 @@
+/* Empty tile waiting for its turn */
+.vc-gpo-tile {
+    position: absolute;
+    box-sizing: border-box;
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    background: var(--background-mod-subtle, var(--background-modifier-accent, rgb(128 128 128 / 15%)));
+}
+
+.vc-gpo-tile::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgb(255 255 255 / 6%) 50%, transparent 80%);
+    background-size: 200% 100%;
+    animation: vc-gpo-shimmer 1.6s linear infinite;
+    pointer-events: none;
+}
+
+/* Overlay inside Discord's own tile while its GIF loads */
+.vc-gpo-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.vc-gpo-indicator {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.vc-gpo-ring {
+    filter: drop-shadow(0 0 2px rgb(0 0 0 / 50%));
+}
+
+.vc-gpo-ring-spin {
+    animation: vc-gpo-spin 0.9s linear infinite;
+}
+
+.vc-gpo-track {
+    fill: none;
+    stroke: rgb(255 255 255 / 25%);
+    stroke-width: 3;
+}
+
+.vc-gpo-bar {
+    fill: none;
+    stroke: var(--brand-500, #5865f2);
+    stroke-width: 3;
+    stroke-linecap: round;
+    transform: rotate(-90deg);
+    transform-origin: 50% 50%;
+    transition: stroke-dashoffset 0.15s linear;
+}
+
+.vc-gpo-indicator-queued .vc-gpo-ring {
+    animation: vc-gpo-pulse 1.4s ease-in-out infinite;
+}
+
+.vc-gpo-pct {
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    color: #fff;
+    text-shadow: 0 0 3px rgb(0 0 0 / 80%);
+    font-variant-numeric: tabular-nums;
+}
+
+@keyframes vc-gpo-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes vc-gpo-pulse {
+    0%,
+    100% {
+        opacity: 0.35;
+    }
+
+    50% {
+        opacity: 0.8;
+    }
+}
+
+@keyframes vc-gpo-shimmer {
+    from {
+        background-position: 200% 0;
+    }
+
+    to {
+        background-position: -200% 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .vc-gpo-tile::after,
+    .vc-gpo-ring-spin,
+    .vc-gpo-indicator-queued .vc-gpo-ring {
+        animation: none;
+    }
+}
