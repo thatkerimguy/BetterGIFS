@@ -9,13 +9,26 @@
       "author": "thatkerimguy (https://github.com/thatkerimguy \"GitHub\")",
       "icon": "GifIcon",
       "channels": {
-        "latest": "1.1.0"
+        "latest": "1.2.0"
       },
       "versions": {
         "1.1.0": {
           "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.1.0.zip",
           "sha256": "5679f81aab164c8bd01d104e63ae6399aa29755b79ac0e8202bc4187df4b0928",
           "size": 7938,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        },
+        "1.2.0": {
+          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.2.0.zip",
+          "sha256": "e8d4a7fcd82bbfa67e0b093533b90ee78ed22a70bfb9a3e09f4cb0a8be37df79",
+          "size": 9331,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
