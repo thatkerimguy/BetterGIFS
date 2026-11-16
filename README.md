@@ -99,3 +99,11 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
 4. Load it in Valenced, either with `bun run serve` during development or by publishing the template repository as a plugin repository and adding its URL in Valenced.
 
 Then enable **GifPickerOptimizer** in Valenced's plugin list. The default quality is **XS**, because Discord mobile already loads the S (`tinywebp`) rendition of Klipy GIFs.
+
+## About the code
+
+These plugins were written with heavy AI assistance (vibecoded). If you're against full-on vibecoding, take that as you will. You're free to remake or edit the plugins yourself, with credit to this repository (https://github.com/thatkerimguy/KerimsPluginRepo), if you want to un-AI the code.
+
+## License
+
+[GPL-3.0-or-later](LICENSE), the same license as Vencord. You can use, change and share the code, as long as you keep the copyright and license notices and share your changes under the same license.
