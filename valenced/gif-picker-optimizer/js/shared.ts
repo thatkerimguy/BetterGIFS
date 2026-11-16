@@ -17,6 +17,10 @@ export interface Settings {
     cacheSize: number;
     /** Show still (not animated) previews in the favourites tab */
     stillFavorites: boolean;
+    /** Switch to the GIF tab first and build the picker a moment later */
+    fastTabSwitch: boolean;
+    /** When not searching, show favourites instead of Trending and the other featured categories */
+    favoritesOnly: boolean;
 }
 
 export const DefaultSettings: Settings = {
@@ -31,6 +35,8 @@ export const DefaultSettings: Settings = {
     offscreenBuffer: 12,
     cacheSize: 1000,
     stillFavorites: false,
+    fastTabSwitch: true,
+    favoritesOnly: false,
 };
 
 let storage: JsonStorage<Settings> | undefined;

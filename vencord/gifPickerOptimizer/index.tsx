@@ -100,6 +100,11 @@ const settings = definePluginSettings({
         description: "Show still images instead of playing GIFs in the favourites tab. Sent GIFs still animate.",
         default: false,
     },
+    favoritesOnly: {
+        type: OptionType.BOOLEAN,
+        description: "When you're not searching, show your favourites instead of Trending GIFs and the other featured categories",
+        default: false,
+    },
 });
 
 /* -------------------------------------------------------------------------- */
@@ -846,6 +851,15 @@ export default definePlugin({
                 replace: "$1$self.SequentialResult,{Result:$2,resultType:this?.props?.resultType,",
             },
         },
+        {
+            // GIF picker: with no resultType (not searching) it shows the featured
+            // categories grid. "Favourites only" shows the favourites list there instead.
+            find: "hideFavoritesTile:",
+            replacement: {
+                match: /(hideFavorites:(\i)\}=this\.props,\{resultType:(\i)\}=)this\.state(?=;return null==\3\?.{0,300}?\3===(\i\.\i)\.FAVORITES)/,
+                replace: "$1$self.frontPage(this.state,$2,$4.FAVORITES)",
+            },
+        },
     ],
 
     flux: {
@@ -855,6 +869,12 @@ export default definePlugin({
     },
 
     SequentialResult,
+
+    /** The picker state its content renders from: favourites instead of the categories grid */
+    frontPage<S extends { resultType?: unknown; }>(state: S, hideFavorites: boolean | undefined, favorites: unknown): S {
+        if (state?.resultType != null || hideFavorites || favorites == null || !settings.store.favoritesOnly) return state;
+        return { ...state, resultType: favorites };
+    },
 
     start() {
         loaded.resize(settings.store.cacheSize);

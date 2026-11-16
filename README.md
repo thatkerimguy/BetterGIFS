@@ -7,6 +7,8 @@ A plugin for **Vencord** (desktop/web) and **Valenced** (mobile) that changes Di
 - **Low-resolution previews.** The picker shows an XS, S or SD version of each GIF. Clicking, tapping or favouriting a GIF still uses Discord's original item, so chat and your favourites always get the full-resolution GIF.
 - **Off-screen unloading with caching.** GIFs you scroll far away from are unloaded, which frees memory and video decoders. When you scroll back they show again straight from cache, without waiting in the load queue. GIFs that are off screen and haven't loaded yet don't download at all. This keeps big favourite libraries smooth on both desktop and mobile.
 - **Still favourites (optional, off by default).** The favourites tab shows still images instead of playing GIFs. The GIF you send still animates.
+- **Favourites only (optional, off by default).** When you're not searching, the picker opens straight to your favourites instead of Trending GIFs and the other featured categories. Searching works as before.
+- **Faster GIF tab switch (mobile, on by default).** Discord builds the whole GIF picker in the same frame as the tab switch, so switching from emojis to GIFs freezes for a moment. The plugin switches the tab first and builds the picker right after.
 
 | Source | How the preview is made |
 |---|---|
@@ -90,7 +92,7 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
    bun run build gif-picker-optimizer
    ```
 
-   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.2.2.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
+   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.3.0.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
 
 4. Load it in Valenced, either with `bun run serve` during development or by publishing the template repository as a plugin repository and adding its URL in Valenced.
 

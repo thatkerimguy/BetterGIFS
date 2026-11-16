@@ -95,6 +95,12 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Verified vs unverified
 
+**Added on 2026-11-16 (1.3.0, favourites only + faster GIF tab switch):**
+- Desktop `favoritesOnly`: the picker parent (find `"hideFavoritesTile:"`, discrapper `chunks/649529.js`) renders the categories grid `L` when `this.state.resultType` is null, else the results list with favourites data when it's `FAVORITES`. The patch swaps `this.state` in `renderContent` for `$self.frontPage(this.state, hideFavorites, FAVORITES)`. The header still reads the real state, so it keeps the search bar and no back arrow. Typing sets `SEARCH` as before. The regex was checked against a minified copy of the code, not in real Discord.
+- Mobile `favoritesOnly`: patches `type` of the memo `GIFPickerCategoriesPage` default and renders `GIFPickerResultsList` with `useFavoriteGIFsMobile().favorites`, the picker's `onPressGIF` (taken from a context provided by the GIFPicker patch) and a `columnWidth` measured with `onLayout`. Falls back to Discord's page when the picker has `hideFavorites`.
+- Mobile `fastTabSwitch`: patches `type` of the memo `GIFPicker` default. The first render is an empty frame with a spinner, and the picker mounts after `requestAnimationFrame` or `InteractionManager.runAfterInteractions` (capped at 300 ms). Picker and categories page render as their own components (`PickerInner`, `CategoriesPageInner`) so the hook order never changes.
+- Why the switch is slow on mobile: on mount, GIFPicker dispatches `initializeSearch`/`resetSearch`, fetches trending search terms, and the categories page fetches trending categories and renders up to 20 rows of animated category GIFs. Not profiled on a device: the deferral helps if the picker mount is the slow part. If the emoji picker's unmount is the slow part, it won't.
+
 **Fixed on 2026-11-16 (1.2.2, favourites stuck loading on mobile):**
 - Discord mobile's `transformFavoriteGifUrl` (`modules/gif_picker/native/GIFPickerUtils.tsx`) rewrites favourites before the picker shows them: proxied (images-ext) ones get `animated=true` (the proxy turns mp4 into animated webp), and Tenor favourites become `<tenor page URL>.gif`, which 302-redirects to `media1.tenor.com/m/<id>AAAAC/<name>.gif`.
 - 1.2.0 unwrapped proxied Tenor mp4s into direct Tenor **mp4** URLs. The mobile tile is an image component, can't show mp4, and apparently never fires onLoad/onError, so tiles spun forever.

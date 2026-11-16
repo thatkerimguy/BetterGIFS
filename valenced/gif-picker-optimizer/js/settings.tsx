@@ -85,6 +85,18 @@ export default function SettingsComponent({ api: { jsonStorage: storage } }: Pro
                             value={s.stillFavorites}
                             onValueChange={(stillFavorites: boolean) => update({ stillFavorites })}
                         />
+                        <TableSwitchRow
+                            label="Favourites only"
+                            subLabel="When you're not searching, show your favourites instead of Trending GIFs and the other featured categories"
+                            value={s.favoritesOnly}
+                            onValueChange={(favoritesOnly: boolean) => update({ favoritesOnly })}
+                        />
+                        <TableSwitchRow
+                            label="Faster GIF tab switch"
+                            subLabel="Switch to the GIF tab right away and build the picker a moment later, instead of freezing until it's ready"
+                            value={s.fastTabSwitch}
+                            onValueChange={(fastTabSwitch: boolean) => update({ fastTabSwitch })}
+                        />
                     </TableRowGroup>
 
                     <TableRadioGroup

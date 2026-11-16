@@ -18,7 +18,8 @@ import { getModules } from "@valenced/modules/finders";
 import { withProps } from "@valenced/modules/finders/filters";
 import { instead } from "@valenced/patcher";
 import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, InteractionManager, StyleSheet, Text, View } from "react-native";
+import { Design } from "@valenced/discord/design";
 
 import type { DiscordModules } from "@valenced/discord/types";
 import type { ReactNode } from "react";
@@ -33,6 +34,9 @@ import { DefaultSettings, getSettings, setStorage, type Settings, useSettings } 
 const PLUGIN_ID = "thatkerimguy.gif-picker-optimizer";
 const ITEM_VIEW_PATH = "modules/gif_picker/native/GIFPickerItemView.tsx";
 const RESULTS_LIST_PATH = "modules/gif_picker/native/GIFPickerResultsList.tsx";
+const PICKER_PATH = "modules/gif_picker/native/GIFPicker.tsx";
+const CATEGORIES_PAGE_PATH = "modules/gif_picker/native/GIFPickerCategoriesPage.tsx";
+const PICKER_UTILS_PATH = "modules/gif_picker/native/GIFPickerUtils.tsx";
 
 let logger: DiscordModules.Logger | undefined;
 
@@ -341,10 +345,146 @@ function OptimizedResultsList({ props, render }: { props: ResultsListProps; rend
 }
 
 /* -------------------------------------------------------------------------- */
+/*                     GIF tab switch and favourites only                     */
+/* -------------------------------------------------------------------------- */
+
+type AnyComponent = (props: any) => ReactNode;
+/** React.memo object: patching `type` changes what every picker renders */
+type Memo = { type: AnyComponent; };
+
+interface PickerProps {
+    inActionSheet?: boolean;
+    hideFavorites?: boolean;
+    onPressGIF?: (item: unknown) => void;
+    selectedGifSrc?: unknown;
+    keyboardDismissMode?: unknown;
+    [k: string]: unknown;
+}
+
+interface PickerUtils {
+    useFavoriteGIFsMobile?: () => { favorites?: unknown[]; };
+    GIF_PICKER_GUTTER_SPACING?: number;
+}
+
+let originalPicker: AnyComponent | undefined;
+let originalCategoriesPage: AnyComponent | undefined;
+let pickerUtils: PickerUtils | undefined;
+let resultsListModule: { default: AnyComponent; } | undefined;
+
+/** Props of the GIF picker around a categories page (for the favourites grid) */
+const PickerContext = createContext<PickerProps | null>(null);
+
+// Rendered as their own components (not called inline), so their hooks don't
+// change the wrapper's hook order when it switches between them.
+const PickerInner: AnyComponent = p => originalPicker!(p);
+const CategoriesPageInner: AnyComponent = p => originalCategoriesPage!(p);
+
+/**
+ * Discord builds the whole GIF picker (search, categories, trending requests,
+ * animated category previews) in the same frame the tab switches, so the tab
+ * freezes until it's done. This renders an empty frame first, so the tab
+ * switch shows at once, and builds the picker right after.
+ */
+function DeferredPicker({ props }: { props: PickerProps; }) {
+    const { fastTabSwitch } = useSettings();
+    const [ready, setReady] = useState(!fastTabSwitch);
+
+    useEffect(() => {
+        if (ready) return;
+        let done = false;
+        const go = () => {
+            if (done) return;
+            done = true;
+            setReady(true);
+        };
+        // Wait for the tab switch to paint (and any animation), but never long
+        const raf = requestAnimationFrame(() => setTimeout(go, 0));
+        const task = InteractionManager.runAfterInteractions(go);
+        const cap = setTimeout(go, 300);
+        return () => {
+            done = true;
+            cancelAnimationFrame(raf);
+            task?.cancel?.();
+            clearTimeout(cap);
+        };
+    }, [ready]);
+
+    return (
+        <PickerContext.Provider value={props}>
+            {ready
+                ? <PickerInner {...props} />
+                : <View style={styles.pickerPlaceholder}><ActivityIndicator /></View>}
+        </PickerContext.Provider>
+    );
+}
+
+/** Shows favourites instead of the featured categories when not searching */
+function CategoriesPage({ props }: { props: { columns?: number; [k: string]: unknown; }; }) {
+    const { favoritesOnly } = useSettings();
+    const picker = useContext(PickerContext);
+    const usable = favoritesOnly
+        && picker != null
+        && picker.hideFavorites !== true
+        && typeof picker.onPressGIF === "function"
+        && typeof pickerUtils?.useFavoriteGIFsMobile === "function"
+        && typeof resultsListModule?.default === "function";
+
+    if (!usable) return <CategoriesPageInner {...props} />;
+    return <FavoritesGrid columns={props.columns || 2} picker={picker!} />;
+}
+
+function FavoritesGrid({ columns, picker }: { columns: number; picker: PickerProps; }) {
+    const favorites = pickerUtils!.useFavoriteGIFsMobile!()?.favorites ?? [];
+    const [width, setWidth] = useState(0);
+    const gutter = pickerUtils?.GIF_PICKER_GUTTER_SPACING ?? 8;
+    const columnWidth = Math.max(0, (width + gutter) / columns - gutter);
+    const ResultsList = resultsListModule!.default;
+
+    return (
+        <View style={styles.favorites} onLayout={e => setWidth(e.nativeEvent.layout.width)}>
+            {favorites.length === 0
+                ? (
+                    <View style={styles.favoritesEmpty}>
+                        <Design.Text variant="text-md/medium" color="text-muted">
+                            No favourite GIFs yet. Search for a GIF and tap the star to add one.
+                        </Design.Text>
+                    </View>
+                )
+                : width > 0 && (
+                    <ResultsList
+                        columns={columns}
+                        columnWidth={columnWidth}
+                        loading={false}
+                        inActionSheet={picker.inActionSheet ?? true}
+                        resultItems={favorites}
+                        onPressGIF={picker.onPressGIF}
+                        selectedGifSrc={picker.selectedGifSrc}
+                        keyboardDismissMode={picker.keyboardDismissMode}
+                    />
+                )}
+        </View>
+    );
+}
+
+/* -------------------------------------------------------------------------- */
 /*                                  UI                                        */
 /* -------------------------------------------------------------------------- */
 
 const styles = StyleSheet.create({
+    pickerPlaceholder: {
+        flex: 1,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    favorites: {
+        flex: 1,
+    },
+    favoritesEmpty: {
+        flex: 1,
+        alignItems: "center",
+        paddingTop: 48,
+        paddingHorizontal: 24,
+    },
     frame: {
         overflow: "hidden",
     },
@@ -743,6 +883,7 @@ export default plugin<{ jsonStorage: Settings; }>({
             }),
 
             getModuleWithImportedPath<{ default: (props: ResultsListProps) => ReactNode; }>(RESULTS_LIST_PATH, mod => {
+                resultsListModule = mod as { default: AnyComponent; };
                 cleanup(
                     instead(mod, "default", function (this: unknown, args, orig) {
                         return (
@@ -753,6 +894,36 @@ export default plugin<{ jsonStorage: Settings; }>({
                         );
                     }),
                 );
+            }),
+
+            getModuleWithImportedPath<PickerUtils>(PICKER_UTILS_PATH, mod => {
+                pickerUtils = mod;
+            }),
+
+            getModuleWithImportedPath<{ default: Memo; }>(PICKER_PATH, mod => {
+                const memo = mod.default;
+                if (typeof memo?.type !== "function") {
+                    logger?.warn?.("GIFPicker isn't a memo component any more, faster tab switch is off");
+                    return;
+                }
+                originalPicker = memo.type;
+                cleanup(instead(memo, "type", (args, orig) => {
+                    originalPicker = orig;
+                    return <DeferredPicker props={args[0] ?? {}} />;
+                }));
+            }),
+
+            getModuleWithImportedPath<{ default: Memo; }>(CATEGORIES_PAGE_PATH, mod => {
+                const memo = mod.default;
+                if (typeof memo?.type !== "function") {
+                    logger?.warn?.("GIFPickerCategoriesPage isn't a memo component any more, favourites only is off");
+                    return;
+                }
+                originalCategoriesPage = memo.type;
+                cleanup(instead(memo, "type", (args, orig) => {
+                    originalCategoriesPage = orig;
+                    return <CategoriesPage props={args[0] ?? {}} />;
+                }));
             }),
         );
     },
