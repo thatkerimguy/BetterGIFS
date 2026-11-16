@@ -1,10 +1,13 @@
 /*
  * GifPickerOptimizer — low resolution preview URL helpers.
- * Shared between the Vencord and Raincord builds (keep both copies in sync).
+ * Shared between the Vencord and Valenced builds (keep both copies in sync).
  *
  * Only the URL that the picker *displays* is changed. The item objects that
  * Discord sends/favourites are never modified, so the full resolution GIF is
  * what ends up in chat and in your favourites.
+ *
+ * URLs are parsed by hand instead of with `URL`, because React Native's `URL`
+ * polyfill doesn't implement every getter and `searchParams.set` everywhere.
  */
 
 export type Quality = "xs" | "s" | "sd" | "original";
@@ -43,33 +46,69 @@ const TENOR_RE = /^https:\/\/(?:media\d?|c)\.tenor\.com(?:\/m)?\/([^/]+?)([A-Za-
 const GIPHY_RE = /^https:\/\/(?:media\d?|i)\.giphy\.com\/(?:media\/(?:v\d\.[^/]+\/)?)?([A-Za-z0-9]+)\/?(?:[^/?#]*)\.(gif|webp|mp4)(?:[?#].*)?$/i;
 const IMAGES_EXT_RE = /^images-ext-\d+\.discordapp\.net$/i;
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v)$/i;
+const URL_RE = /^(https?:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i;
 
 export function normalizeUrl(url: string): string {
     return url.startsWith("//") ? "https:" + url : url;
 }
 
-function safeUrl(url: string): URL | null {
-    try {
-        return new URL(normalizeUrl(url));
-    } catch {
-        return null;
+/** Minimal URL model: enough to read the host/path and add query parameters */
+interface ParsedUrl {
+    protocol: string;
+    host: string;
+    hostname: string;
+    pathname: string;
+    /** raw (still encoded) key/value pairs, in order */
+    params: [string, string][];
+    hash: string;
+}
+
+function parseUrl(url: string): ParsedUrl | null {
+    const m = URL_RE.exec(normalizeUrl(url));
+    if (!m) return null;
+    const [, protocol, host, pathname, search = "", hash = ""] = m;
+    const params: [string, string][] = [];
+    for (const part of search.slice(1).split("&")) {
+        if (!part) continue;
+        const eq = part.indexOf("=");
+        params.push(eq === -1 ? [part, ""] : [part.slice(0, eq), part.slice(eq + 1)]);
     }
+    return {
+        protocol: protocol.toLowerCase(),
+        host,
+        hostname: host.replace(/:\d+$/, "").toLowerCase(),
+        pathname: pathname || "/",
+        params,
+        hash,
+    };
+}
+
+function setParam(u: ParsedUrl, key: string, value: string) {
+    const v = encodeURIComponent(value);
+    const existing = u.params.find(([k]) => k === key);
+    if (existing) existing[1] = v;
+    else u.params.push([key, v]);
+}
+
+function stringifyUrl(u: ParsedUrl): string {
+    const search = u.params.length ? "?" + u.params.map(([k, v]) => `${k}=${v}`).join("&") : "";
+    return `${u.protocol}//${u.host}${u.pathname}${search}${u.hash}`;
 }
 
 /** Path of the underlying media, also for images-ext proxied external URLs */
-function mediaPath(u: URL) {
+function mediaPath(u: ParsedUrl) {
     let path = u.pathname;
     try { path = decodeURIComponent(path); } catch { }
     return path.toLowerCase();
 }
 
 export function isVideoUrl(url: string): boolean {
-    const u = safeUrl(url);
+    const u = parseUrl(url);
     return u != null && VIDEO_EXT_RE.test(mediaPath(u));
 }
 
 export function isKlipyUrl(url: string): boolean {
-    const u = safeUrl(url);
+    const u = parseUrl(url);
     return u != null && /(^|\.)klipy\.com$/i.test(u.hostname);
 }
 
@@ -100,15 +139,15 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
         return `https://media.giphy.com/media/${id}/${code}.${video ? "mp4" : "webp"}`;
     }
 
-    const u = safeUrl(url);
+    const u = parseUrl(url);
     if (!u) return null;
-    const host = u.hostname.toLowerCase();
+    const host = u.hostname;
 
     // Twitter / X images (vx/fx/twitter embeds)
     if (host === "pbs.twimg.com" && /^\/(media|ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\//.test(u.pathname)) {
         if (u.pathname.startsWith("/media/")) {
-            u.searchParams.set("name", TWITTER_NAMES[quality]);
-            return u.toString();
+            setParam(u, "name", TWITTER_NAMES[quality]);
+            return stringifyUrl(u);
         }
         return null;
     }
@@ -120,7 +159,7 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
         // The media proxy cannot shrink videos while keeping them animated
         if (VIDEO_EXT_RE.test(path)) return null;
 
-        if (isCdnAttachment) u.hostname = "media.discordapp.net";
+        if (isCdnAttachment) u.host = u.hostname = "media.discordapp.net";
 
         const cap = QUALITY_CAP[quality];
         const w = dims?.width ?? 0;
@@ -129,17 +168,78 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
             // Don't ask for something bigger than the original
             const scale = Math.min(1, cap / Math.max(w, h));
             if (scale >= 1 && !path.endsWith(".gif")) return null;
-            u.searchParams.set("width", String(Math.max(1, Math.round(w * scale))));
-            u.searchParams.set("height", String(Math.max(1, Math.round(h * scale))));
+            setParam(u, "width", String(Math.max(1, Math.round(w * scale))));
+            setParam(u, "height", String(Math.max(1, Math.round(h * scale))));
         } else {
-            u.searchParams.set("width", String(cap));
+            setParam(u, "width", String(cap));
         }
 
         if (path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".avif") || !/\.(png|jpe?g)$/.test(path)) {
-            u.searchParams.set("format", "webp");
-            u.searchParams.set("animated", "true");
+            setParam(u, "format", "webp");
+            setParam(u, "animated", "true");
         }
-        return u.toString();
+        return stringifyUrl(u);
+    }
+
+    return null;
+}
+
+// Still (non-animated) renditions, for "still previews in favourites"
+//   Tenor: PNG poster frames. Ag = nano, AN = tiny, Ae = medium, AD = full size
+const TENOR_STILL_CODES: Record<Quality, string> = { xs: "Ag", s: "AN", sd: "Ae", original: "AD" };
+//   Giphy: single frame renditions
+const GIPHY_STILL_NAMES: Record<Quality, string> = { xs: "100w_s.gif", s: "200w_s.gif", sd: "480w_s.jpg", original: "giphy_s.gif" };
+const TWITTER_VIDEO_RE = /^https:\/\/video\.twimg\.com\/tweet_video\/([A-Za-z0-9_-]+)\.mp4(?:[?#].*)?$/i;
+
+/**
+ * Returns the URL of a still (first frame, not animated) image for `src`, or null
+ * if none can be derived from the URL. The result is always an image, also for videos.
+ */
+export function stillUrl(src: string, quality: Quality, dims?: { width?: number; height?: number; }): string | null {
+    if (!src) return null;
+    const url = normalizeUrl(src);
+
+    const tenor = url.match(TENOR_RE);
+    if (tenor) {
+        const [, id, , name] = tenor;
+        return `https://media.tenor.com/${id}${TENOR_STILL_CODES[quality]}/${name}.png`;
+    }
+
+    const giphy = url.match(GIPHY_RE);
+    if (giphy) return `https://media.giphy.com/media/${giphy[1]}/${GIPHY_STILL_NAMES[quality]}`;
+
+    // Twitter GIFs are mp4s with a matching thumbnail
+    const twVideo = url.match(TWITTER_VIDEO_RE);
+    if (twVideo) return `https://pbs.twimg.com/tweet_video_thumb/${twVideo[1]}.jpg`;
+
+    const u = parseUrl(url);
+    if (!u) return null;
+    const host = u.hostname;
+
+    // pbs.twimg.com images are already still
+    if (host === "pbs.twimg.com") return quality === "original" ? url : rewriteUrl(url, quality, dims) ?? url;
+
+    // Discord's media proxy returns the first frame unless `animated=true` is asked for,
+    // and a thumbnail for videos
+    const isCdnAttachment = host === "cdn.discordapp.com" && /^\/(ephemeral-)?attachments\//.test(u.pathname);
+    if (isCdnAttachment || host === "media.discordapp.net" || IMAGES_EXT_RE.test(host)) {
+        if (isCdnAttachment) u.host = u.hostname = "media.discordapp.net";
+        u.params = u.params.filter(([k]) => k !== "animated");
+
+        if (quality !== "original") {
+            const cap = QUALITY_CAP[quality];
+            const w = dims?.width ?? 0;
+            const h = dims?.height ?? 0;
+            if (w > 0 && h > 0) {
+                const scale = Math.min(1, cap / Math.max(w, h));
+                setParam(u, "width", String(Math.max(1, Math.round(w * scale))));
+                setParam(u, "height", String(Math.max(1, Math.round(h * scale))));
+            } else {
+                setParam(u, "width", String(cap));
+            }
+        }
+        setParam(u, "format", VIDEO_EXT_RE.test(mediaPath(u)) ? "jpeg" : "webp");
+        return stringifyUrl(u);
     }
 
     return null;

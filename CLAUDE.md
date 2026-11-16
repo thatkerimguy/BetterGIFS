@@ -3,15 +3,18 @@
 GifPickerOptimizer: a Discord GIF picker plugin with two builds.
 
 - `vencord/gifPickerOptimizer/`: Vencord user plugin for desktop and web. **This is the one being installed and tested now.**
-- `raincord/gifpickeroptimizer/`: plugin for rain (Raincord), a React Native mobile client mod at github.com/ra1ncord/rain (main repo on codeberg.org/raincord/rain). Not tested on a device yet.
+- `valenced/gif-picker-optimizer/`: plugin for Valenced (github.com/Valenced/valenced), a React Native mobile client mod. Replaced the old Raincord build. Not tested on a device yet.
 
-`lowres.ts` and `queue.ts` are identical in both folders. Change both together.
+`lowres.ts`, `queue.ts` and `cache.ts` are identical in `vencord/gifPickerOptimizer/` and `valenced/gif-picker-optimizer/js/`. Change both together.
 
 ## What the user asked for
 
 1. Load GIFs one at a time, left to right and top to bottom. Each one finishes before the next starts.
 2. Show a loading or progress indicator on tiles that haven't loaded.
 3. Show low-resolution previews in the picker: XS/S/SD on Klipy and Tenor, and smaller versions of vx/fx/twitter and Discord links. The full-resolution GIF must still be what gets sent to chat.
+4. Port the mobile build from Raincord to Valenced.
+5. Unload GIFs that are off screen and load the ones on screen, with caching, so big favourite libraries perform well on mobile and desktop.
+6. Optional (off by default): still image previews in the favourites tab instead of playing GIFs.
 
 ## The user's setup
 
@@ -29,7 +32,7 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 ### The webpack patch
 
 - Find string: `"renderEmptyFavorite"`. That module holds the GIF picker results list (class `W`) and the tile component (class `H`, exported as `uG`). Inside `renderItem`, Discord does `(0,r.jsx)(H,{item:u,index:t,format:u.format,src:u.src,coords:s,onClick:…,renderExtras:…,imagePool,videoPool,…})`.
-- The patch replaces `H` with `$self.SequentialResult` and passes `Result:H`.
+- The patch replaces `H` with `$self.SequentialResult` and passes `Result:H` and `resultType:this?.props?.resultType` (the list's `resultType`, used to detect the favourites tab).
 - Match: `/(\(0,\i\.jsx\)\()(\i),\{(?=item:(\i),index:\i,format:\3\.format,src:\3\.src)/`. This was checked against the datamined code.
 - Reference copy of Discord's code: github.com/Wumpus-Central/discrapper-canary, `chunks/884037.js` (the picker) and `chunks/821102.js` (GIFPickerViewStore). Chunk IDs change between Discord builds, so search by string instead of chunk ID.
 - How tile `H` loads:
@@ -44,6 +47,19 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
    - `LoadOverlay` attaches capture-phase listeners (`progress`, `canplaythrough`, `error`) to the parent element for videos. Progress is `buffered / duration`.
    - For images it loads the same URL in a probe `Image()`. The browser shares the request, so it doesn't download twice.
 3. **done**: `H` is rendered as normal.
+
+**Off-screen unloading (`unloadOffscreen`, `offscreenMargin`):**
+- Two `ViewportWatcher`s: "visible" (50px, feeds queue priority) and "near" (`offscreenMargin` px). Their IntersectionObservers are rooted on the picker's scroll container (`findScroller`), because rooted on the window `rootMargin` does nothing: the scroller clips the tiles first. (The old 100px window margin had no effect for that reason.)
+- The watched element is the placeholder, the still tile, or `.vc-gpo-sentinel`, an `inset:0` div rendered through `renderExtras` inside H.
+- Not near → "parked": a plain placeholder is rendered instead of H, so H unmounts and returns its pooled `<video>`. A queued/loading ticket is cancelled, so off-screen GIFs never download.
+- Back near → if the URL is in `loaded` (an LRU, `cacheSize`), it shows at once without queueing; the browser HTTP cache serves it.
+
+**Still favourites (`stillFavorites`):**
+- Favourites are detected by `resultType` matching /favou?rite/ or, as a fallback, items with a numeric `order` and no `id` (frecency favourites have that shape on desktop and mobile).
+- `stillUrl()` in `lowres.ts` gives a still rendition when the source has one: Tenor PNG posters (`Ag`/`AN`/`Ae`/`AD`, checked against the Tenor API), Giphy `_s` renditions, `video.twimg.com/tweet_video` → `pbs.twimg.com/tweet_video_thumb`, and Discord's media proxy without `animated=true` (`format=jpeg` for videos).
+- Otherwise (Klipy, etc.) `StillTile` loads the preview, captures the first frame with `createImageBitmap` (falling back to a canvas copy), draws it with object-fit cover, and releases the element. Frames are kept in an LRU (`frames`, 300).
+- Still tiles are the plugin's own div (like the placeholder), not H. Clicks and the context menu still go to Discord's handlers with the original item.
+- Fallback chain on error: still URL → low-res preview (frame captured) → original.
 
 **Errors and timeouts:**
 - If the preview fails, the tile switches to the original `src`.
@@ -79,7 +95,13 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Verified vs unverified
 
-**Verified in the cloud session:**
+**Verified on 2026-11-16 (Valenced port + unloading + still favourites):**
+- Valenced build: `tsc -b` passes (and catches a planted error), `valenced-plugin build` produces `build/js/index.js`. Biome only reports style (tabs vs spaces, import type).
+- Vencord build: `pnpm build` passes, `tsc --noEmit` on all of Vencord has 0 errors, oxlint only reports the license header rule that applies to built-in plugins.
+- Unit tests (Bun) for `rewriteUrl`, `stillUrl` and the LRU caches pass. Generated Tenor still/preview URLs return 200 live.
+- **Not run in real Discord or on a device.** Check: tiles unload and come back when scrolling a big favourites list; the sentinel sits inside H (if tiles never unload, H's root isn't positioned and the sentinel covers the whole list, which is the safe failure); still favourites show; clicking a still/parked tile sends the original.
+
+**Verified in the earlier cloud session:**
 - Both builds typecheck. The full Vencord build passed; the rain build and eslint passed.
 - jsdom test with a replica of Discord's `H` tile:
   - strictly one download at a time, in index order;
@@ -109,16 +131,20 @@ A preview is only used if it's the same media type as the original (video stays 
 - **Videos without a smaller version:** Twitter `video.twimg.com` GIFs and mp4 attachments have no smaller rendition, and the media proxy can't shrink a video and keep it animated. They only get sequential loading.
 - **Desktop progress:** the percentage only appears for video tiles.
 
-## Mobile (rain) notes
+## Mobile (Valenced) notes
 
-- It patches `default` on `modules/gif_picker/native/GIFPickerItemView.tsx` (found with `findByFilePathLazy`) using `instead`.
+- Plugin layout follows github.com/Valenced/valenced-plugin-template: `manifest.json` (id `thatkerimguy.gif-picker-optimizer`), `tsconfig.json` extending `../../tsconfig.base.json`, JS entry `js/index.tsx`. JS-only, no native code.
+- APIs used: `plugin({ jsonStorage, start({ cleanup, jsonStorage, logger }), SettingsComponent })`, `getModuleWithImportedPath` from `@valenced/discord/utils/modules/finders`, `instead` from `@valenced/patcher`, `onFluxEventDispatched` / `Stores` from `@valenced/discord/flux` (the flux patch **must return the payload** or the event is blocked), `getModules(withProps("HTTP","get","post","put","patch","del"))` for HTTP (same as the community tenor-gif-search plugin), `Design` components and `Page` for settings.
+- It patches `default` on `modules/gif_picker/native/GIFPickerItemView.tsx` using `instead`.
 - It always calls the original render, which uses hooks, with the original item. Then it swaps the `Image` element in the returned tree:
   - for a queued placeholder, or
   - for a clone with the preview `source` plus `onLoad`, `onError` and `onProgress`.
 - Discord mobile already uses `tinywebp`, so the default quality is XS, which requests `nanowebp`.
-- Flux hook: rain's `intercept` from `@api/flux`. HTTP goes through `findByProps("HTTP","get",…).HTTP.get`. See `src/plugins/bringbacktenor` in rain for the same pattern.
+- **Off-screen unloading:** `GIFPickerResultsList.tsx` renders a `MasonryFlashList` whose `viewedItemIndexes` Set only grows, so every tile ever scrolled past stays loaded. The plugin also patches that module's `default`: `OptimizedResultsList` finds the list element (has `onViewableItemsChanged` + `renderItem`), wraps `onViewableItemsChanged` with a stable callback that feeds a `ViewportStore` (first/last viewable index), and provides it through React context. `OptimizedItem` is parked when its index is more than `offscreenBuffer` items outside that range: the Image is replaced with an empty frame and queued work is cancelled. On return, a URL in `loaded` shows at once (native image cache).
+- **Still favourites on mobile** only work for sources `stillUrl()` covers. React Native can't pause an animated image from JS, so Klipy favourites stay animated.
+- `lowres.ts` parses URLs by hand: React Native's `URL` polyfill doesn't reliably implement `searchParams.set`.
 - Mobile reference source: github.com/Wumpus-Central/discord-mobile-datamining, `discord_app/modules/gif_picker/`.
-- rain builds plugins into its bundle. Copy the folder to `rain/src/plugins/`, then `bun install` and `bun run build` (or `bun run serve`).
+- Build: copy the folder into the template's `plugins/`, `bun install`, `bun run build gif-picker-optimizer` (npm can't build the template's git-hosted CLI; use Bun). ZIP: `gradlew packageGifPickerOptimizer` (needs JDK 25 + Android SDK).
 
 ## Settings (Vencord)
 
@@ -131,6 +157,12 @@ A preview is only used if it's the same media type as the original (video stays 
 | loadTimeout | 10 s |
 | showProgress | on |
 | klipyLookup | on |
+| unloadOffscreen | on |
+| offscreenMargin | 800 px (mobile: `offscreenBuffer`, 12 items) |
+| cacheSize | 1000 |
+| stillFavorites | off |
+
+Mobile defaults are the same except quality `xs` and no `prioritizeVisible` (always on).
 
 ## Suggested next steps
 

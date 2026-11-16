@@ -1,6 +1,6 @@
 /*
  * GifPickerOptimizer — sequential load queue.
- * Shared between the Vencord and Raincord builds (keep both copies in sync).
+ * Shared between the Vencord and Valenced builds (keep both copies in sync).
  *
  * Tiles register a ticket when they mount. The queue starts the waiting ticket
  * that comes first in reading order and only starts the next one once the running

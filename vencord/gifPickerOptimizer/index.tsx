@@ -6,19 +6,23 @@
  * - Shows a loading / progress indicator on tiles that are still empty.
  * - Shows a lower resolution preview in the picker (XS / S / SD) while still
  *   sending and favouriting the original, full resolution GIF.
+ * - Unloads GIFs that scrolled far off screen and shows them again from cache
+ *   when they come back, so big favourite libraries stay smooth.
+ * - Optionally shows still (not animated) previews in the favourites tab.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 import { definePluginSettings } from "@api/Settings";
-import { classNameFactory } from "@utils/css";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { classNameFactory } from "@utils/css";
 import { Logger } from "@utils/Logger";
 import definePlugin, { makeRange, OptionType } from "@utils/types";
-import { GIFPickerViewStore, LocaleStore, RestAPI, useEffect, useRef, useState } from "@webpack/common";
+import { GIFPickerViewStore, LocaleStore, RestAPI, useCallback, useEffect, useRef, useState } from "@webpack/common";
 import type { ComponentType, MouseEvent, ReactNode } from "react";
 
-import { BoundedSet, isKlipyUrl, isVideoUrl, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl } from "./lowres";
+import { LoadedCache, LruCache } from "./cache";
+import { BoundedSet, isKlipyUrl, isVideoUrl, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, Ticket } from "./queue";
 import managedStyle from "./styles.css?managed";
 
@@ -70,6 +74,30 @@ const settings = definePluginSettings({
         description: "Ask Discord's GIF API for the small Klipy renditions (one extra request per search page). Needed for XS/S on Klipy results.",
         default: true,
     },
+    unloadOffscreen: {
+        type: OptionType.BOOLEAN,
+        description: "Unload GIFs you scrolled far away from to free memory. They come back from cache when you scroll back.",
+        default: true,
+    },
+    offscreenMargin: {
+        type: OptionType.SLIDER,
+        description: "How far (px) above and below the visible area GIFs stay loaded",
+        markers: [200, 400, 800, 1200, 2000],
+        default: 800,
+        stickToMarkers: true,
+    },
+    cacheSize: {
+        type: OptionType.SLIDER,
+        description: "How many loaded GIFs to remember, so they show instantly when you scroll back to them",
+        markers: [300, 1000, 3000],
+        default: 1000,
+        stickToMarkers: true,
+    },
+    stillFavorites: {
+        type: OptionType.BOOLEAN,
+        description: "Show still images instead of playing GIFs in the favourites tab. Sent GIFs still animate.",
+        default: false,
+    },
 });
 
 /* -------------------------------------------------------------------------- */
@@ -77,12 +105,16 @@ const settings = definePluginSettings({
 /* -------------------------------------------------------------------------- */
 
 const queue = new LoadQueue();
-/** URLs that finished loading this session, shown instantly next time */
-const loaded = new BoundedSet<string>(600);
+/** URLs that finished loading. Scrolled-back tiles with a cached URL skip the queue. */
+const loaded = new LoadedCache(1000);
 /** Preview URLs that failed, never tried again */
 const failed = new BoundedSet<string>(600);
 /** `${quality}:${id|url}` -> low resolution URL from Discord's GIF API */
 const apiPreviews = new Map<string, string>();
+/** First frames captured for still favourites, by URL */
+const frames = new LruCache<string, ImageBitmap | HTMLCanvasElement>(300, (_, frame) => {
+    if ("close" in frame) frame.close();
+});
 
 interface GifItem {
     id?: string;
@@ -91,6 +123,8 @@ interface GifItem {
     gif_src?: string;
     width?: number;
     height?: number;
+    /** only favourites have this (their position in the favourites list) */
+    order?: number;
 }
 
 function quality() {
@@ -153,34 +187,131 @@ function pickSrc(item: GifItem, src: string): string {
     return low;
 }
 
+interface StillSource {
+    url: string;
+    /** true when `url` is animated and the first frame has to be captured locally */
+    capture: boolean;
+}
+
+/** What a still favourite shows: a still rendition if the source has one, else a frame of the preview */
+function pickStill(item: GifItem, src: string): StillSource {
+    const frame = stillUrl(normalizeUrl(src), quality(), item);
+    if (frame && !failed.has(frame)) return { url: frame, capture: false };
+    return { url: pickSrc(item, src), capture: true };
+}
+
+function isFavorites(resultType: unknown, item: GifItem) {
+    if (typeof resultType === "string" && /favou?rite/i.test(resultType)) return true;
+    // Favourites come from the frecency settings: they have an `order` and no `id`
+    return typeof item.order === "number" && item.id == null;
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               Visibility                                   */
 /* -------------------------------------------------------------------------- */
 
-const observed = new Map<Element, Ticket>();
-let observer: IntersectionObserver | null = null;
+/** element -> its scrolling ancestor (or null for the window). Every node on the way is cached too. */
+const scrollerOf = new WeakMap<Element, Element | null>();
 
-function observe(el: Element, t: Ticket) {
-    observer ??= new IntersectionObserver(entries => {
-        let changed = false;
-        for (const entry of entries) {
-            const ticket = observed.get(entry.target);
-            if (ticket && ticket.visible !== entry.isIntersecting) {
-                ticket.visible = entry.isIntersecting;
-                changed = true;
-            }
+function findScroller(el: Element): Element | null {
+    const path: Element[] = [];
+    let found: Element | null = null;
+    for (let n = el.parentElement; n; n = n.parentElement) {
+        if (scrollerOf.has(n)) {
+            found = scrollerOf.get(n)!;
+            break;
         }
-        if (changed) queue.kick();
-    }, { rootMargin: "100px 0px" });
-
-    observed.set(el, t);
-    observer.observe(el);
+        path.push(n);
+        const { overflowY } = getComputedStyle(n);
+        if (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") {
+            found = n;
+            break;
+        }
+    }
+    for (const n of path) scrollerOf.set(n, found);
+    return found;
 }
 
-function unobserve(el: Element | null) {
-    if (!el) return;
-    observed.delete(el);
-    observer?.unobserve(el);
+/**
+ * IntersectionObservers rooted on the picker's own scroller. Rooted on the window,
+ * `rootMargin` would do nothing, because the scroller clips the tiles first.
+ */
+class ViewportWatcher {
+    private observers = new Map<string, { root: Element | null; io: IntersectionObserver; }>();
+    private callbacks = new Map<Element, (isIntersecting: boolean) => void>();
+    private observerOf = new Map<Element, IntersectionObserver>();
+    private rootIds = new WeakMap<Element, number>();
+    private nextRootId = 1;
+
+    constructor(private margin: () => number) { }
+
+    observe(el: Element, cb: (isIntersecting: boolean) => void) {
+        const root = findScroller(el);
+        const margin = this.margin();
+        let rootId = 0;
+        if (root) {
+            rootId = this.rootIds.get(root) ?? this.nextRootId++;
+            this.rootIds.set(root, rootId);
+        }
+        const key = `${rootId}:${margin}`;
+
+        let entry = this.observers.get(key);
+        if (!entry) {
+            const io = new IntersectionObserver(entries => {
+                for (const e of entries) this.callbacks.get(e.target)?.(e.isIntersecting);
+            }, { root, rootMargin: `${margin}px 0px` });
+            entry = { root, io };
+            this.observers.set(key, entry);
+        }
+
+        this.callbacks.set(el, cb);
+        this.observerOf.set(el, entry.io);
+        entry.io.observe(el);
+    }
+
+    unobserve(el: Element) {
+        this.callbacks.delete(el);
+        this.observerOf.get(el)?.unobserve(el);
+        this.observerOf.delete(el);
+    }
+
+    disconnect() {
+        for (const { io } of this.observers.values()) io.disconnect();
+        this.observers.clear();
+        this.callbacks.clear();
+        this.observerOf.clear();
+    }
+}
+
+/** "On screen" for the load queue's priority */
+const visibleWatcher = new ViewportWatcher(() => 50);
+/** "Near the screen": tiles outside of this are unloaded */
+const nearWatcher = new ViewportWatcher(() => settings.store.offscreenMargin);
+
+/**
+ * Watches whichever element the ref is attached to (the placeholder, the still
+ * tile, or a sentinel inside Discord's tile) and reports whether it's near the screen.
+ */
+function useViewport(onVisible: (visible: boolean) => void) {
+    const [near, setNear] = useState(true);
+    const elRef = useRef<Element | null>(null);
+    const cb = useRef(onVisible);
+    cb.current = onVisible;
+
+    const ref = useCallback((el: Element | null) => {
+        if (elRef.current === el) return;
+        if (elRef.current) {
+            visibleWatcher.unobserve(elRef.current);
+            nearWatcher.unobserve(elRef.current);
+        }
+        elRef.current = el;
+        if (el) {
+            visibleWatcher.observe(el, v => cb.current(v));
+            nearWatcher.observe(el, setNear);
+        }
+    }, []);
+
+    return [ref, near] as const;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -304,10 +435,147 @@ function LoadOverlay({ src, video, showProgress, onDone, onError }: WatcherProps
     );
 }
 
+/** Draws `frame` into `canvas` like `object-fit: cover` */
+function drawCover(canvas: HTMLCanvasElement, frame: CanvasImageSource & { width: number; height: number; }) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx || !frame.width || !frame.height) return;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const cw = Math.max(1, Math.round((rect.width || frame.width) * dpr));
+    const ch = Math.max(1, Math.round((rect.height || frame.height) * dpr));
+    if (canvas.width !== cw) canvas.width = cw;
+    if (canvas.height !== ch) canvas.height = ch;
+    const scale = Math.max(cw / frame.width, ch / frame.height);
+    const w = frame.width * scale;
+    const h = frame.height * scale;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(frame, (cw - w) / 2, (ch - h) / 2, w, h);
+}
+
+/** Loads `url` (image or video) and returns its first frame, cached */
+function captureFrame(url: string, video: boolean, signal: { cancelled: boolean; }): Promise<ImageBitmap | HTMLCanvasElement> {
+    const cached = frames.get(url);
+    if (cached) return Promise.resolve(cached);
+
+    return new Promise((resolve, reject) => {
+        const el = video ? document.createElement("video") : new Image();
+        const cleanup = () => {
+            el.onerror = null;
+            if (el instanceof HTMLVideoElement) {
+                el.onloadeddata = null;
+                // Free the decoder right away
+                el.removeAttribute("src");
+                el.load();
+            } else {
+                el.onload = null;
+            }
+        };
+        const ready = async () => {
+            try {
+                if (signal.cancelled) throw new Error("cancelled");
+                let frame: ImageBitmap | HTMLCanvasElement;
+                try {
+                    frame = await createImageBitmap(el);
+                } catch {
+                    // Fall back to copying the frame onto a canvas
+                    const w = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
+                    const h = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight;
+                    frame = document.createElement("canvas");
+                    frame.width = w;
+                    frame.height = h;
+                    frame.getContext("2d")!.drawImage(el, 0, 0);
+                }
+                frames.set(url, frame);
+                resolve(frame);
+            } catch (e) {
+                reject(e);
+            } finally {
+                cleanup();
+            }
+        };
+
+        el.onerror = () => {
+            cleanup();
+            reject(new Error(`Couldn't load ${url}`));
+        };
+        if (el instanceof HTMLVideoElement) {
+            el.muted = true;
+            el.preload = "auto";
+            el.onloadeddata = ready;
+        } else {
+            el.decoding = "async";
+            el.onload = ready;
+        }
+        el.src = url;
+    });
+}
+
+interface StillTileProps {
+    viewRef(el: Element | null): void;
+    source: StillSource;
+    video: boolean;
+    loading: boolean;
+    showProgress: boolean;
+    coords: ResultProps["coords"];
+    onClick(e: MouseEvent): void;
+    onContextMenu(e: MouseEvent): void;
+    extras: ReactNode;
+    onDone(): void;
+    onError(): void;
+}
+
+/** A favourite shown as a still image instead of Discord's (animated) tile */
+function StillTile({ viewRef, source, video, loading, showProgress, coords, onClick, onContextMenu, extras, onDone, onError }: StillTileProps) {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const cbs = useRef({ onDone, onError });
+    cbs.current = { onDone, onError };
+
+    useEffect(() => {
+        if (!source.capture) return;
+        const signal = { cancelled: false };
+        captureFrame(source.url, video, signal).then(
+            frame => {
+                if (signal.cancelled) return;
+                if (canvasRef.current) drawCover(canvasRef.current, frame);
+                cbs.current.onDone();
+            },
+            () => !signal.cancelled && cbs.current.onError(),
+        );
+        return () => void (signal.cancelled = true);
+    }, [source.url, source.capture, video]);
+
+    return (
+        <div
+            ref={viewRef}
+            className={cl("tile", "tile-still")}
+            style={coords}
+            onClick={onClick}
+            onContextMenu={onContextMenu}
+        >
+            {source.capture
+                ? <canvas ref={canvasRef} className={cl("still-media")} />
+                : (
+                    <img
+                        className={cl("still-media")}
+                        src={source.url}
+                        alt=""
+                        draggable={false}
+                        decoding="async"
+                        onLoad={() => cbs.current.onDone()}
+                        onError={() => cbs.current.onError()}
+                    />
+                )}
+            {loading && showProgress && <Indicator state="loading" />}
+            {extras}
+        </div>
+    );
+}
+
 type Phase = "queued" | "loading" | "done";
 
 interface ResultProps {
     Result: ComponentType<any>;
+    resultType?: unknown;
     item: GifItem;
     index: number;
     src: string;
@@ -323,39 +591,64 @@ interface ResultProps {
 const GIF_TYPE_VIDEO = 2;
 
 function SequentialResultInner(props: ResultProps) {
-    const { Result, ...rest } = props;
+    const { Result, resultType, ...rest } = props;
     const { item, src, coords } = rest;
-    const { sequential, concurrency, prioritizeVisible, loadTimeout, showProgress } = settings.use([
+    const {
+        sequential, concurrency, prioritizeVisible, loadTimeout, showProgress,
+        unloadOffscreen, cacheSize, stillFavorites,
+    } = settings.use([
         "sequential", "concurrency", "prioritizeVisible", "loadTimeout", "showProgress", "quality",
+        "unloadOffscreen", "offscreenMargin", "cacheSize", "stillFavorites",
     ]);
+    if (loaded.max !== cacheSize) loaded.resize(cacheSize);
+
+    const still = stillFavorites && isFavorites(resultType, item);
+    /** The URL this tile shows, for the current mode */
+    const pick = () => still ? pickStill(item, src).url : pickSrc(item, src);
 
     const indexRef = useRef(rest.index);
     indexRef.current = rest.index;
-    const elRef = useRef<HTMLDivElement>(null);
     const ticketRef = useRef<Ticket | null>(null);
+    const visibleRef = useRef(false);
 
     const [chosen, setChosen] = useState<string | null>(() => {
-        const p = pickSrc(item, src);
-        return loaded.has(p) ? p : null;
+        const p = pick();
+        return loaded.hit(p) ? p : null;
     });
     const [phase, setPhase] = useState<Phase>(() => chosen ? "done" : "queued");
 
-    // Register in the load queue
+    const [viewRef, near] = useViewport(visible => {
+        visibleRef.current = visible;
+        const t = ticketRef.current;
+        if (t && t.visible !== visible) {
+            t.visible = visible;
+            queue.kick();
+        }
+    });
+    const parked = unloadOffscreen && !near;
+
+    // Wait for a turn in the load queue (only while near the screen)
     useEffect(() => {
-        if (phase !== "queued") return;
+        if (phase !== "queued" || parked) return;
+
+        // Came back on screen and was loaded before: show it from cache right away
+        const cached = pick();
+        if (loaded.hit(cached)) {
+            setChosen(cached);
+            setPhase("done");
+            return;
+        }
 
         queue.concurrency = sequential ? concurrency : 64;
         queue.prioritizeVisible = prioritizeVisible;
 
-        const el = elRef.current;
         const ticket: Ticket = {
-            visible: false,
+            visible: visibleRef.current,
             order: () => indexRef.current ?? 0,
             start: () => {
-                unobserve(el);
-                const p = pickSrc(item, src);
+                const p = pick();
                 setChosen(p);
-                if (loaded.has(p)) {
+                if (loaded.hit(p)) {
                     queue.finish(ticket);
                     setPhase("done");
                 } else {
@@ -364,14 +657,27 @@ function SequentialResultInner(props: ResultProps) {
             },
         };
         ticketRef.current = ticket;
-        if (el) observe(el, ticket);
         queue.enqueue(ticket);
 
-        return () => {
-            unobserve(el);
-            queue.cancel(ticket);
-        };
-    }, []);
+        return () => queue.cancel(ticket);
+    }, [phase, parked, still]);
+
+    // Scrolled far away while loading: stop, free the slot, and queue again when it comes back
+    useEffect(() => {
+        if (!parked || phase !== "loading") return;
+        if (ticketRef.current) queue.cancel(ticketRef.current);
+        setPhase("queued");
+    }, [parked, phase]);
+
+    // The still favourites setting changed: pick the URL again
+    const stillRef = useRef(still);
+    useEffect(() => {
+        if (stillRef.current === still) return;
+        stillRef.current = still;
+        if (ticketRef.current) queue.cancel(ticketRef.current);
+        setChosen(null);
+        setPhase("queued");
+    }, [still]);
 
     // Release the slot after the timeout so one slow GIF doesn't hold everything up
     useEffect(() => {
@@ -388,38 +694,66 @@ function SequentialResultInner(props: ResultProps) {
     const original = normalizeUrl(src);
 
     const onDone = () => {
-        if (chosen) loaded.add(chosen);
+        if (chosen) loaded.mark(chosen);
+        if (phase !== "loading") return;
         if (ticketRef.current) queue.finish(ticketRef.current);
         setPhase("done");
     };
 
     const onError = () => {
         if (chosen && chosen !== original) {
-            // Preview not available, fall back to the original
+            // Still / preview not available: try the next best one, then the original
             failed.add(chosen);
-            setChosen(original);
+            const next = pick();
+            setChosen(next !== chosen ? next : original);
             return;
         }
         if (ticketRef.current) queue.finish(ticketRef.current);
         setPhase("done");
     };
 
-    if (phase === "queued") {
+    const click = (e: MouseEvent) => rest.onClick?.(item, rest.index, { shiftKey: e.shiftKey });
+    const contextMenu = (e: MouseEvent) => rest.onContextMenu?.(e, item);
+
+    // Waiting for its turn, or unloaded because it's far off screen
+    if (phase === "queued" || parked) {
         return (
             <div
-                ref={elRef}
-                className={cl("tile")}
+                ref={viewRef}
+                className={cl("tile", { "tile-parked": parked })}
                 style={coords}
-                onClick={e => rest.onClick?.(item, rest.index, { shiftKey: e.shiftKey })}
-                onContextMenu={e => rest.onContextMenu?.(e, item)}
+                onClick={click}
+                onContextMenu={contextMenu}
             >
-                {showProgress && <Indicator state="queued" />}
+                {showProgress && !parked && <Indicator state="queued" />}
                 {rest.renderExtras?.(item)}
             </div>
         );
     }
 
     const shown = chosen ?? original;
+
+    if (still) {
+        // A ready-made still image is shown as is. Anything else is animated: capture its first frame.
+        const source: StillSource = { url: shown, capture: stillUrl(original, quality(), item) !== shown };
+        return (
+            <StillTile
+                key={shown}
+                viewRef={viewRef}
+                source={source}
+                video={source.capture && (rest.format === GIF_TYPE_VIDEO || isVideoUrl(shown))}
+                loading={phase === "loading"}
+                showProgress={showProgress}
+                coords={coords}
+                onClick={click}
+                onContextMenu={contextMenu}
+                extras={rest.renderExtras?.(item)}
+                onDone={onDone}
+                onError={onError}
+            />
+        );
+    }
+
     const video = rest.format === GIF_TYPE_VIDEO || isVideoUrl(shown);
 
     return (
@@ -430,6 +764,8 @@ function SequentialResultInner(props: ResultProps) {
             renderExtras={(it: GifItem) => (
                 <>
                     {rest.renderExtras?.(it)}
+                    {/* Fills the tile, so the viewport watcher can see Discord's tile */}
+                    <div ref={viewRef} className={cl("sentinel")} aria-hidden="true" />
                     {phase === "loading" && (
                         <LoadOverlay
                             src={shown}
@@ -447,14 +783,14 @@ function SequentialResultInner(props: ResultProps) {
 
 const SequentialResult = ErrorBoundary.wrap(SequentialResultInner, {
     // If anything goes wrong, render Discord's own tile untouched
-    fallback: ({ wrappedProps: { Result, ...props } }) => <Result {...props} />,
+    fallback: ({ wrappedProps: { Result, resultType, ...props } }) => <Result {...props} />,
     displayName: "GifPickerOptimizerResult",
 });
 
 export default definePlugin({
     name: "GifPickerOptimizer",
-    description: "Loads GIF picker results one by one with a progress indicator, using low resolution previews while still sending the full resolution GIF",
-    authors: [{ name: "GifPickerOptimizer", id: 0n }],
+    description: "Loads GIF picker results one by one with a progress indicator, using low resolution previews while still sending the full resolution GIF. Unloads off-screen GIFs and can show favourites as still images.",
+    authors: [{ name: "thatkerimguy", id: 0n }],
     settings,
     managedStyle,
 
@@ -464,7 +800,7 @@ export default definePlugin({
             find: "renderEmptyFavorite",
             replacement: {
                 match: /(\(0,\i\.jsx\)\()(\i),\{(?=item:(\i),index:\i,format:\3\.format,src:\3\.src)/,
-                replace: "$1$self.SequentialResult,{Result:$2,",
+                replace: "$1$self.SequentialResult,{Result:$2,resultType:this?.props?.resultType,",
             },
         },
     ],
@@ -477,9 +813,14 @@ export default definePlugin({
 
     SequentialResult,
 
+    start() {
+        loaded.resize(settings.store.cacheSize);
+    },
+
     stop() {
-        observer?.disconnect();
-        observer = null;
-        observed.clear();
+        visibleWatcher.disconnect();
+        nearWatcher.disconnect();
+        loaded.clear();
+        frames.clear();
     },
 });
