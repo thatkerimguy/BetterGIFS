@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "name": "BetterGIFS",
-  "description": "GifPickerOptimizer for Valenced: sequential loading, low resolution previews, off-screen unloading and still favourites in the GIF picker.",
+  "name": "KerimsPluginRepo",
+  "description": "Kerim's Valenced plugins. GifPickerOptimizer: sequential loading, low resolution previews, off-screen unloading and still favourites in the GIF picker.",
   "plugins": {
     "thatkerimguy.gif-picker-optimizer": {
       "name": "GifPickerOptimizer",
@@ -9,11 +9,11 @@
       "author": "thatkerimguy (https://github.com/thatkerimguy \"GitHub\")",
       "icon": "GifIcon",
       "channels": {
-        "latest": "1.4.1"
+        "latest": "1.5.0"
       },
       "versions": {
         "1.1.0": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.1.0.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.1.0.zip",
           "sha256": "5679f81aab164c8bd01d104e63ae6399aa29755b79ac0e8202bc4187df4b0928",
           "size": 7938,
           "dependencies": {
@@ -26,7 +26,7 @@
           }
         },
         "1.2.0": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.2.0.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.2.0.zip",
           "sha256": "e8d4a7fcd82bbfa67e0b093533b90ee78ed22a70bfb9a3e09f4cb0a8be37df79",
           "size": 9331,
           "dependencies": {
@@ -39,7 +39,7 @@
           }
         },
         "1.2.1": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.2.1.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.2.1.zip",
           "sha256": "f2795ca77b5ff2bfe750ade9fb66feeb0d028cc8fc57b9325ceb4809dbe1d1d7",
           "size": 9373,
           "dependencies": {
@@ -52,7 +52,7 @@
           }
         },
         "1.2.2": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.2.2.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.2.2.zip",
           "sha256": "8db0328edab278772fd4e6e695fd58a13a48f430ac35328ba5f80c7d7f6a969a",
           "size": 9922,
           "dependencies": {
@@ -65,7 +65,7 @@
           }
         },
         "1.3.0": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.3.0.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.3.0.zip",
           "sha256": "1d554e2fb7defea90fbfc9b8ff93c8d23436ab6f687c0c33f500124fa46875cf",
           "size": 10847,
           "dependencies": {
@@ -78,7 +78,7 @@
           }
         },
         "1.3.1": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.3.1.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.3.1.zip",
           "sha256": "e6b6796793e50c00a8168cdecd0b5adc418e958478676ee181d4b06dc90a24d1",
           "size": 10847,
           "dependencies": {
@@ -91,7 +91,7 @@
           }
         },
         "1.4.0": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.4.0.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.4.0.zip",
           "sha256": "6b248b8df973cf3a0114309c8f80d3c06827d67aaf7bffb5fc840d96d9cd8f2b",
           "size": 10944,
           "dependencies": {
@@ -104,9 +104,22 @@
           }
         },
         "1.4.1": {
-          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.4.1.zip",
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.4.1.zip",
           "sha256": "20f7df1e0d03eb7b61275a2de52c48b497e8bcfb22a7f1e53eb5321a0c8027b7",
           "size": 11165,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        },
+        "1.5.0": {
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.5.0.zip",
+          "sha256": "61012ecb650fac14b2de2a0bacc718bc628f6b2a6b920034a54fab299cc0cdc7",
+          "size": 12045,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
