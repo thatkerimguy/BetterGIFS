@@ -51,6 +51,18 @@ Enable **GifPickerOptimizer** in Settings → Vencord → Plugins. The default q
 
 ## Valenced
 
+### Install from the plugin repository
+
+Add this URL as a plugin repository in Valenced, then install **GifPickerOptimizer** from it:
+
+```
+https://thatkerimguy.github.io/BetterGIFS/index.json
+```
+
+Updates come through the same repository. The `Publish Valenced repository` workflow publishes it to GitHub Pages: on every push to `main` that changes `valenced/`, it builds any plugin whose `manifest.json` version isn't published yet. To release a change, bump `version` in `valenced/gif-picker-optimizer/manifest.json`.
+
+### Build it yourself
+
 Valenced plugins are built with the [Valenced plugin template](https://github.com/Valenced/valenced-plugin-template). The template needs [Bun](https://bun.com/) to build.
 
 1. Clone the template and install its dependencies:
