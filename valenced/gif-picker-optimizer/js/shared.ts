@@ -27,7 +27,7 @@ export const DefaultSettings: Settings = {
     // Discord mobile already shows the S (tinywebp) rendition of Klipy GIFs
     quality: "xs",
     sequential: true,
-    concurrency: 1,
+    concurrency: 3,
     loadTimeout: 10,
     showProgress: true,
     klipyLookup: true,

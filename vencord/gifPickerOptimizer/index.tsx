@@ -51,7 +51,7 @@ const settings = definePluginSettings({
         type: OptionType.SLIDER,
         description: "How many GIFs may load at the same time when sequential loading is on",
         markers: makeRange(1, 6, 1),
-        default: 1,
+        default: 3,
         stickToMarkers: true,
     },
     prioritizeVisible: {

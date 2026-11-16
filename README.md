@@ -2,7 +2,7 @@
 
 A plugin for **Vencord** (desktop/web) and **Valenced** (mobile) that changes Discord's GIF picker:
 
-- **Sequential loading.** GIFs load one at a time, left to right and top to bottom. The next one starts only after the current one has loaded. You can raise the limit to 2–6 at once in settings.
+- **Sequential loading.** GIFs load in reading order, left to right and top to bottom, 3 at a time by default. The next one starts only when one of them has finished loading. You can set the limit from 1 (strictly one at a time) to 6 in settings.
 - **Loading indicator.** Empty tiles show a pulsing ring while they wait their turn. While a tile loads it shows a spinner, or a percentage when the download size is known.
 - **Low-resolution previews.** The picker shows an XS, S or SD version of each GIF. Clicking, tapping or favouriting a GIF still uses Discord's original item, so chat and your favourites always get the full-resolution GIF.
 - **Off-screen unloading with caching.** GIFs you scroll far away from are unloaded, which frees memory and video decoders. When you scroll back they show again straight from cache, without waiting in the load queue. GIFs that are off screen and haven't loaded yet don't download at all. This keeps big favourite libraries smooth on both desktop and mobile.
@@ -92,7 +92,7 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
    bun run build gif-picker-optimizer
    ```
 
-   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.3.0.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
+   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.3.1.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
 
 4. Load it in Valenced, either with `bun run serve` during development or by publishing the template repository as a plugin repository and adding its URL in Valenced.
 

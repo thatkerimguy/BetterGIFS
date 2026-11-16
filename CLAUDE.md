@@ -172,7 +172,7 @@ A preview is only used if it's the same media type as the original (video stays 
 |---|---|
 | quality (`xs`/`s`/`sd`/`original`) | `s` |
 | sequential | on |
-| concurrency | 1 |
+| concurrency | 3 (was 1 before 1.3.1) |
 | prioritizeVisible | on |
 | loadTimeout | 10 s |
 | showProgress | on |

@@ -5,7 +5,7 @@
 	"description": "Loads GIFs in the picker one by one with a progress indicator, shows low resolution previews while still sending the full resolution GIF, and unloads off-screen GIFs so big favourite libraries stay smooth.",
 	"author": "thatkerimguy (https://github.com/thatkerimguy \"GitHub\")",
 	"icon": "GifIcon",
-	"version": "1.3.0",
+	"version": "1.3.1",
 	"dependencies": {
 		"valenced.api": {
 			"version": ">=1 <2"
