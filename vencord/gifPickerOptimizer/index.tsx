@@ -34,6 +34,11 @@ import managedStyle from "./styles.css?managed";
 const logger = new Logger("GifPickerOptimizer");
 const cl = classNameFactory("vc-gpo-");
 
+/** "800", "1.2K", "3K": four digit marker labels are too wide and wrap under the slider */
+const shortNumber = (v: number) => v >= 1000 ? `${+(v / 1000).toFixed(1)}K` : String(v);
+/** Slider labels: short markers, and whole numbers instead of "3.00" while dragging */
+const sliderLabels = { onMarkerRender: shortNumber, onValueRender: (v: number) => String(Math.round(v)) };
+
 const settings = definePluginSettings({
     quality: {
         type: OptionType.SELECT,
@@ -56,6 +61,7 @@ const settings = definePluginSettings({
         markers: makeRange(1, 6, 1),
         default: 3,
         stickToMarkers: true,
+        componentProps: sliderLabels,
     },
     prioritizeVisible: {
         type: OptionType.BOOLEAN,
@@ -68,6 +74,7 @@ const settings = definePluginSettings({
         markers: [3, 5, 8, 10, 15, 20, 30],
         default: 10,
         stickToMarkers: true,
+        componentProps: sliderLabels,
     },
     showProgress: {
         type: OptionType.BOOLEAN,
@@ -90,6 +97,7 @@ const settings = definePluginSettings({
         markers: [200, 400, 800, 1200, 2000],
         default: 800,
         stickToMarkers: true,
+        componentProps: sliderLabels,
         onChange: () => nearWatcher.refresh(),
     },
     cacheSize: {
@@ -98,6 +106,7 @@ const settings = definePluginSettings({
         markers: [300, 1000, 3000],
         default: 1000,
         stickToMarkers: true,
+        componentProps: sliderLabels,
         onChange: (size: number) => loaded.resize(size),
     },
     stillFavorites: {
