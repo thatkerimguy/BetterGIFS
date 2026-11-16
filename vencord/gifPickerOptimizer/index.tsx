@@ -105,14 +105,15 @@ const settings = definePluginSettings({
         description: "Show still images instead of playing GIFs in the favourites tab. Sent GIFs still animate.",
         default: false,
     },
-    cache: {
-        type: OptionType.COMPONENT,
-        component: () => <CacheSettings />,
-    },
     favoritesOnly: {
         type: OptionType.BOOLEAN,
         description: "Hide Trending GIFs and the other featured categories. The picker's main page keeps search and the Favorites category.",
         default: false,
+    },
+    // Last, so the stats and reset button don't sit between the toggles
+    cache: {
+        type: OptionType.COMPONENT,
+        component: () => <CacheSettings />,
     },
 });
 
@@ -528,10 +529,13 @@ function LoadOverlay({ src, video, showProgress, onDone, onError }: WatcherProps
     );
 }
 
-/** Draws `frame` into `canvas` like `object-fit: cover` */
-function drawCover(canvas: HTMLCanvasElement, frame: CanvasImageSource & { width: number; height: number; }) {
+/**
+ * Draws `frame` into `canvas` like `object-fit: cover`. False when it couldn't:
+ * a frame evicted from the cache is closed (0×0) and can't be drawn any more.
+ */
+function drawCover(canvas: HTMLCanvasElement, frame: CanvasImageSource & { width: number; height: number; }): boolean {
     const ctx = canvas.getContext("2d");
-    if (!ctx || !frame.width || !frame.height) return;
+    if (!ctx || !frame.width || !frame.height) return false;
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const cw = Math.max(1, Math.round((rect.width || frame.width) * dpr));
@@ -542,7 +546,12 @@ function drawCover(canvas: HTMLCanvasElement, frame: CanvasImageSource & { width
     const w = frame.width * scale;
     const h = frame.height * scale;
     ctx.clearRect(0, 0, cw, ch);
-    ctx.drawImage(frame, (cw - w) / 2, (ch - h) / 2, w, h);
+    try {
+        ctx.drawImage(frame, (cw - w) / 2, (ch - h) / 2, w, h);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -645,14 +654,16 @@ function StillTile({ viewRef, source, video, loading, showProgress, coords, onCl
         const target = rect && rect.width > 0 && rect.height > 0
             ? { width: Math.round(rect.width * dpr), height: Math.round(rect.height * dpr) }
             : undefined;
-        captureFrame(source.url, video, signal, target).then(
-            frame => {
-                if (signal.cancelled) return;
-                if (canvasRef.current) drawCover(canvasRef.current, frame);
-                cbs.current.onDone();
-            },
-            () => !signal.cancelled && cbs.current.onError(),
-        );
+        const run = (retry: boolean): Promise<void> => captureFrame(source.url, video, signal, target).then(frame => {
+            if (signal.cancelled) return;
+            if (canvasRef.current && !drawCover(canvasRef.current, frame)) {
+                // Evicted from the cache (and closed) before it was drawn: capture it again
+                if (retry) return run(false);
+                throw new Error("Couldn't draw the still frame");
+            }
+            cbs.current.onDone();
+        });
+        run(true).catch(() => !signal.cancelled && cbs.current.onError());
         return () => void (signal.cancelled = true);
     }, [source.url, source.capture, video]);
 

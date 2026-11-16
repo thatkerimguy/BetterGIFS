@@ -95,6 +95,17 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Verified vs unverified
 
+**Fixed on 2026-11-16 (1.5.1, third review):**
+- Mobile `TenorPageResolver`: a non-OK HEAD response (429, 5xx) counts as a failed lookup (retried after 5 minutes) instead of being saved as "no small version" for good.
+- `KlipyResolver`: only HTTP 4xx rejections (not 408/429) count toward skipping a media_format (`isRejection`). Timeouts and network errors no longer disable a format for the session.
+- Mobile stall fallback: a preview that still reports progress keeps loading; it only falls back after `loadTimeout` seconds without progress (and at least 2 × `loadTimeout` in total).
+- Mobile `useSettings` always calls the same hook: it subscribes to the last storage (`hookStorage`), which is kept after the plugin stops.
+- Desktop still tiles: a frame that was evicted (closed) before it was drawn is captured again instead of leaving a blank tile with a spinner.
+- `LoadQueue` keeps waiting tickets in a binary heap (rebuilt on `kick()`, cancelled ones skipped): draining 5000 tickets went from 99 ms to 7 ms. Order changes must call `kick()`.
+- Desktop settings: the Cache section is now last.
+- CI: `.github/workflows/shared-files.yml` and a step in the publish workflow fail when the four shared files differ between the builds.
+- Tests now run with Node (`node --experimental-transform-types`), since Bun isn't on PATH; klipy.ts imports need `.ts` extensions added for that (see the scratch `t/n` copy).
+
 **Changed on 2026-11-16 (1.5.0, second review + cache reset; repo renamed):**
 - The GitHub repo is now `thatkerimguy/KerimsPluginRepo`; the Valenced repository URL is `https://thatkerimguy.github.io/KerimsPluginRepo/index.json` (the old BetterGIFS Pages URL stops working; users re-add the new one).
 - Klipy favourite lookups (`klipyFormats`) only run for favourites (`isFavoriteItem`). Search/trending results get previews from `lookupLowRes` only; before, at S/SD on mobile every Klipy result did its own `/gifs/search`.

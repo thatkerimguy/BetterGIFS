@@ -52,9 +52,17 @@ export const cacheControl: {
 } = {};
 
 let storage: JsonStorage<Settings> | undefined;
+/**
+ * The storage components subscribe to. Kept after the plugin stops, so a
+ * component that re-renders then still calls the same hook (React requires the
+ * same hooks on every render). It's only unset before the first start, when no
+ * patched component can be mounted yet.
+ */
+let hookStorage: JsonStorage<Settings> | undefined;
 
 export function setStorage(s: JsonStorage<Settings> | undefined) {
     storage = s;
+    if (s) hookStorage = s;
 }
 
 /** Current settings, outside of React */
@@ -64,5 +72,5 @@ export function getSettings(): Settings {
 
 /** Current settings in a component, re-rendering when they change */
 export function useSettings(): Settings {
-    return { ...DefaultSettings, ...storage?.use() };
+    return { ...DefaultSettings, ...hookStorage?.use() };
 }

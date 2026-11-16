@@ -9,6 +9,11 @@
  * Reading order is the item index: Discord's masonry grid places item 0, 1, 2...
  * into columns left to right, row by row, so the index is exactly "left to right,
  * top to bottom" even though the rows of a masonry grid don't line up in pixels.
+ *
+ * Waiting tickets are kept in a binary heap, so starting one costs O(log n)
+ * instead of a scan over every waiting tile (thousands with a big favourites
+ * library and unloading off). The heap is rebuilt when the order changes
+ * (`kick()`), and cancelled tickets are skipped when they come up.
  */
 
 export interface Ticket {
@@ -32,21 +37,30 @@ export class LoadQueue {
     private scheduled = false;
     private seq = 0;
 
+    /** Waiting tickets, best first at [0]. Can also hold cancelled ones (skipped). */
+    private heap: Ticket[] = [];
+    /** The order changed since the heap was built */
+    private dirty = false;
+    /** `prioritizeVisible` the heap was built with */
+    private builtVisibleFirst = true;
+
     enqueue(t: Ticket) {
         t.seq = this.seq++;
         this.waiting.add(t);
-        this.kick();
+        if (!this.dirty) this.push(t);
+        this.schedule();
     }
 
     /** Ticket unmounted or no longer interested */
     cancel(t: Ticket) {
+        // Left in the heap, skipped when it comes up
         this.waiting.delete(t);
-        if (this.active.delete(t)) this.kick();
+        if (this.active.delete(t)) this.schedule();
     }
 
     /** Ticket finished (loaded, errored or timed out) */
     finish(t: Ticket) {
-        if (this.active.delete(t)) this.kick();
+        if (this.active.delete(t)) this.schedule();
     }
 
     /**
@@ -58,7 +72,7 @@ export class LoadQueue {
         const key = Symbol("block");
         this.blockers.add(key);
         const release = () => {
-            if (this.blockers.delete(key)) this.kick();
+            if (this.blockers.delete(key)) this.schedule();
         };
         setTimeout(release, timeoutMs);
         return release;
@@ -70,6 +84,11 @@ export class LoadQueue {
 
     /** Something about the ordering changed (visibility/position) */
     kick() {
+        this.dirty = true;
+        this.schedule();
+    }
+
+    private schedule() {
         if (this.scheduled) return;
         this.scheduled = true;
         // Deferred so that every tile mounted in the same render registers first
@@ -87,20 +106,70 @@ export class LoadQueue {
 
     private pump() {
         if (this.blockers.size) return;
+        // Rebuild when the order changed, or when cancelled tickets pile up
+        if (this.dirty || this.builtVisibleFirst !== this.prioritizeVisible || this.heap.length > this.waiting.size * 2 + 64) {
+            this.rebuild();
+        }
+
         const limit = Math.max(1, this.concurrency | 0);
         while (this.active.size < limit && this.waiting.size) {
-            let best: Ticket | null = null;
-            for (const t of this.waiting)
-                if (best == null || this.compare(t, best) < 0) best = t;
+            const best = this.pop();
+            if (!best) break;
+            if (!this.waiting.has(best)) continue; // cancelled
 
-            this.waiting.delete(best!);
-            this.active.add(best!);
+            this.waiting.delete(best);
+            this.active.add(best);
             try {
-                best!.start();
+                best.start();
             } catch (e) {
                 console.error("[GifPickerOptimizer] ticket start failed", e);
-                this.active.delete(best!);
+                this.active.delete(best);
             }
         }
+    }
+
+    private rebuild() {
+        this.dirty = false;
+        this.builtVisibleFirst = this.prioritizeVisible;
+        // order() is read once per ticket here, not on every comparison
+        const keyed = [...this.waiting].map(t => ({ t, v: t.visible, o: t.order(), s: t.seq ?? 0 }));
+        const visibleFirst = this.prioritizeVisible;
+        keyed.sort((a, b) => (visibleFirst && a.v !== b.v ? (a.v ? -1 : 1) : a.o - b.o || a.s - b.s));
+        // A sorted array is a valid heap
+        this.heap = keyed.map(k => k.t);
+    }
+
+    private push(t: Ticket) {
+        const h = this.heap;
+        h.push(t);
+        let i = h.length - 1;
+        while (i > 0) {
+            const parent = (i - 1) >> 1;
+            if (this.compare(h[i], h[parent]) >= 0) break;
+            [h[i], h[parent]] = [h[parent], h[i]];
+            i = parent;
+        }
+    }
+
+    private pop(): Ticket | undefined {
+        const h = this.heap;
+        if (!h.length) return undefined;
+        const top = h[0];
+        const last = h.pop()!;
+        if (h.length) {
+            h[0] = last;
+            let i = 0;
+            for (; ;) {
+                const l = 2 * i + 1;
+                const r = l + 1;
+                let m = i;
+                if (l < h.length && this.compare(h[l], h[m]) < 0) m = l;
+                if (r < h.length && this.compare(h[r], h[m]) < 0) m = r;
+                if (m === i) break;
+                [h[i], h[m]] = [h[m], h[i]];
+                i = m;
+            }
+        }
+        return top;
     }
 }

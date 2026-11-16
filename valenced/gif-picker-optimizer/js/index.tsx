@@ -221,8 +221,9 @@ class TenorPageResolver {
                     fetch(pageUrl, { method: "HEAD" }),
                     wait(8000).then(() => null),
                 ]);
-                if (!res) {
-                    // Timed out: try again later
+                if (!res || !res.ok) {
+                    // Timed out, rate limited or a server error: try again later,
+                    // don't save it as "no small version"
                     this.failedAt.set(pageUrl, Date.now());
                     return;
                 }
@@ -784,12 +785,25 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
     };
 
     // A preview that neither loads nor fails (some image views never report either)
-    // falls back to the next option instead of spinning forever
+    // falls back to the next option instead of spinning forever. One that's still
+    // downloading (progress events keep coming) is only slow: it keeps loading.
     const errorRef = useRef(error);
     errorRef.current = error;
+    const progressAt = useRef(0);
     useEffect(() => {
         if (phase !== "loading" || !chosen || chosen === original) return;
-        const t = setTimeout(() => errorRef.current(), loadTimeout * 2000);
+        progressAt.current = 0;
+        const quietLimit = loadTimeout * 1000;
+        let t: ReturnType<typeof setTimeout>;
+        const check = () => {
+            const quiet = Date.now() - progressAt.current;
+            if (progressAt.current && quiet < quietLimit) {
+                t = setTimeout(check, quietLimit - quiet);
+                return;
+            }
+            errorRef.current();
+        };
+        t = setTimeout(check, loadTimeout * 2000);
         return () => clearTimeout(t);
     }, [phase, chosen]);
 
@@ -828,7 +842,9 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
                 onProgress: (e: any) => {
                     imgProps.onProgress?.(e);
                     const ev = e?.nativeEvent ?? e;
-                    if (phase === "loading" && ev?.total > 0) setProgress(ev.loaded / ev.total);
+                    if (phase !== "loading") return;
+                    progressAt.current = Date.now();
+                    if (ev?.total > 0) setProgress(ev.loaded / ev.total);
                 },
             },
         };

@@ -41,6 +41,12 @@ jobs:
         with:
           path: src
 
+      - name: Check the shared files match the Vencord build
+        run: |
+          for f in cache.ts klipy.ts lowres.ts queue.ts; do
+            diff -u "src/vencord/gifPickerOptimizer/$f" "src/valenced/gif-picker-optimizer/js/$f"
+          done
+
       - name: Check out published branch
         run: |
           set -euo pipefail

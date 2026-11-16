@@ -41,8 +41,8 @@ const SAVE_DELAY_MS = 2000;
 const LOAD_TIMEOUT_MS = 2000;
 const SEARCH_TIMEOUT_MS = 8000;
 /**
- * A media_format whose searches failed this many times in a row (and never
- * worked) is skipped for the rest of the session: the API probably rejects it.
+ * A media_format the API rejected (HTTP 4xx) this many times in a row, and that
+ * never worked, is skipped for the rest of the session.
  */
 const MAX_FORMAT_FAILURES = 2;
 
@@ -132,8 +132,9 @@ export class KlipyResolver {
                     this.formatFailures.delete(format);
                     if (hit) return hit;
                 } catch (e) {
-                    // e.g. the API doesn't accept this media_format: try the next one
-                    if (!this.workingFormats.has(format)) {
+                    // Try the next format. Only a rejection counts against this one:
+                    // a timeout or network error says nothing about the format.
+                    if (!this.workingFormats.has(format) && isRejection(e)) {
                         this.formatFailures.set(format, (this.formatFailures.get(format) ?? 0) + 1);
                     }
                     this.opts.onError?.(e);
@@ -249,6 +250,17 @@ export class KlipyResolver {
             this.opts.onError?.(e);
         }
     }
+}
+
+/**
+ * Whether a failed search was the API refusing the request (HTTP 4xx), which for
+ * these searches means it doesn't accept the media_format. Rate limits (429),
+ * timeouts (408), network errors and our own timeout have no status or another one.
+ */
+export function isRejection(e: unknown): boolean {
+    const err = e as { status?: unknown; response?: { status?: unknown; }; } | null;
+    const status = Number(err?.status ?? err?.response?.status);
+    return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 export function wait(ms: number) {
