@@ -33,6 +33,9 @@ const MAX_ENTRIES = 5000;
 const SEARCH_LIMIT = 50;
 const SPACING_MS = 300;
 const SAVE_DELAY_MS = 2000;
+/** Don't wait longer than this for the saved cache, or for one search */
+const LOAD_TIMEOUT_MS = 2000;
+const SEARCH_TIMEOUT_MS = 8000;
 
 export class KlipyResolver {
     /** `${format}|${pageKey}` -> low resolution URL, or "" when the search didn't find it */
@@ -90,7 +93,7 @@ export class KlipyResolver {
         if (existing) return existing;
 
         const run = this.chain.then(async () => {
-            await this.loaded;
+            await Promise.race([this.loaded, wait(LOAD_TIMEOUT_MS)]);
             for (const format of formats) {
                 const cached = this.cache.get(this.key(format, pageUrl));
                 if (cached) return cached;
@@ -116,7 +119,12 @@ export class KlipyResolver {
         const q = klipyPageQuery(pageUrl);
         if (!q) return null;
 
-        const results = await this.opts.search(q, format, SEARCH_LIMIT);
+        const results = await Promise.race([
+            this.opts.search(q, format, SEARCH_LIMIT),
+            wait(SEARCH_TIMEOUT_MS).then(() => {
+                throw new Error(`Klipy lookup timed out (media_format=${format})`);
+            }),
+        ]);
         const want = pageKey(pageUrl);
         let hit: string | null = null;
         for (const r of results ?? []) {
@@ -161,6 +169,6 @@ export class KlipyResolver {
     }
 }
 
-function wait(ms: number) {
+export function wait(ms: number) {
     return new Promise<void>(resolve => setTimeout(resolve, ms));
 }

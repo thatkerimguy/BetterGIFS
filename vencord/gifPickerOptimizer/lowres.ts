@@ -143,20 +143,30 @@ export function isKlipyUrl(url: string): boolean {
     return u != null && /(^|\.)klipy\.com$/i.test(u.hostname);
 }
 
+export interface RewriteOptions {
+    /**
+     * Always return an (animated) image, never a video. Discord mobile shows every
+     * GIF picker tile with an image component, which can't play mp4/webm.
+     */
+    imagesOnly?: boolean;
+}
+
 /**
  * Returns a lower resolution URL for `src` that can be derived from the URL alone,
- * or null if none is known. Always keeps the media category (video stays video,
- * image stays image) so the picker renders it with the same element type.
+ * or null if none is known. Keeps the media category (video stays video, image
+ * stays image) so the picker renders it with the same element type, unless
+ * `imagesOnly` asks for images only.
  */
-export function rewriteUrl(src: string, quality: Quality, dims?: { width?: number; height?: number; }): string | null {
+export function rewriteUrl(src: string, quality: Quality, dims?: { width?: number; height?: number; }, opts?: RewriteOptions): string | null {
     if (quality === "original" || !src) return null;
     const url = sourceUrl(src);
+    const imagesOnly = opts?.imagesOnly === true;
 
     // Tenor
     const tenor = url.match(TENOR_RE);
     if (tenor) {
         const [, id, , name, ext] = tenor;
-        const video = ext === "mp4" || ext === "webm";
+        const video = !imagesOnly && (ext === "mp4" || ext === "webm");
         const code = TENOR_CODES[quality][video ? "video" : "image"];
         return `https://media.tenor.com/${id}${code}/${name}.${video ? "mp4" : "webp"}`;
     }
@@ -165,7 +175,7 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
     const giphy = url.match(GIPHY_RE);
     if (giphy) {
         const [, id, ext] = giphy;
-        const video = ext === "mp4";
+        const video = !imagesOnly && ext === "mp4";
         const code = GIPHY_CODES[quality][video ? "video" : "image"];
         return `https://media.giphy.com/media/${id}/${code}.${video ? "mp4" : "webp"}`;
     }
@@ -187,8 +197,11 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
     const isCdnAttachment = host === "cdn.discordapp.com" && /^\/(ephemeral-)?attachments\//.test(u.pathname);
     if (isCdnAttachment || host === "media.discordapp.net" || IMAGES_EXT_RE.test(host)) {
         const path = mediaPath(u);
-        // The media proxy cannot shrink videos while keeping them animated
-        if (VIDEO_EXT_RE.test(path)) return null;
+        const isVideo = VIDEO_EXT_RE.test(path);
+        // Desktop plays these as videos, and the media proxy can't shrink a video into
+        // a video. Mobile shows proxied videos as animated webp (`animated=true`, like
+        // Discord mobile itself), and that can be resized like any image.
+        if (isVideo && !(imagesOnly && IMAGES_EXT_RE.test(host))) return null;
 
         if (isCdnAttachment) u.host = u.hostname = "media.discordapp.net";
 
@@ -198,14 +211,14 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
         if (w > 0 && h > 0) {
             // Don't ask for something bigger than the original
             const scale = Math.min(1, cap / Math.max(w, h));
-            if (scale >= 1 && !path.endsWith(".gif")) return null;
+            if (scale >= 1 && !path.endsWith(".gif") && !isVideo) return null;
             setParam(u, "width", String(Math.max(1, Math.round(w * scale))));
             setParam(u, "height", String(Math.max(1, Math.round(h * scale))));
         } else {
             setParam(u, "width", String(cap));
         }
 
-        if (path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".avif") || !/\.(png|jpe?g)$/.test(path)) {
+        if (isVideo || path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".avif") || !/\.(png|jpe?g)$/.test(path)) {
             setParam(u, "format", "webp");
             setParam(u, "animated", "true");
         }
@@ -293,6 +306,19 @@ export function lowResMediaFormat(selectedFormat: string, quality: Quality): str
     if (fmt.startsWith("nano")) return null;
     if (fmt.startsWith("tiny") && wanted === "tiny") return null;
     return wanted + family;
+}
+
+// Discord mobile turns Tenor favourites into `<tenor page URL>.gif`, which redirects
+// to the full size GIF on media.tenor.com
+const TENOR_PAGE_GIF_RE = /^https?:\/\/(?:www\.)?tenor\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?view\/[^?#]+\.gif(?:[?#].*)?$/i;
+
+export function isTenorPageGif(url: string): boolean {
+    return TENOR_PAGE_GIF_RE.test(normalizeUrl(url));
+}
+
+/** Whether `url` is a Tenor media URL that `rewriteUrl` understands */
+export function isTenorMediaUrl(url: string): boolean {
+    return TENOR_RE.test(normalizeUrl(url));
 }
 
 /* -------------------------------------------------------------------------- */

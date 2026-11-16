@@ -95,6 +95,15 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Verified vs unverified
 
+**Fixed on 2026-11-16 (1.2.2, favourites stuck loading on mobile):**
+- Discord mobile's `transformFavoriteGifUrl` (`modules/gif_picker/native/GIFPickerUtils.tsx`) rewrites favourites before the picker shows them: proxied (images-ext) ones get `animated=true` (the proxy turns mp4 into animated webp), and Tenor favourites become `<tenor page URL>.gif`, which 302-redirects to `media1.tenor.com/m/<id>AAAAC/<name>.gif`.
+- 1.2.0 unwrapped proxied Tenor mp4s into direct Tenor **mp4** URLs. The mobile tile is an image component, can't show mp4, and apparently never fires onLoad/onError, so tiles spun forever.
+- Mobile now calls `rewriteUrl(..., { imagesOnly: true })` (Tenor/Giphy give animated webp; proxied unknown videos get resized `format=webp&animated=true` through images-ext) and rejects any video preview URL.
+- `TenorPageResolver` (mobile only, `index.tsx`) follows the page URL redirect once with `fetch(HEAD)` and saves page → media in `tenor-pages.json`.
+- Klipy lookups on mobile always ask for image formats.
+- Safety nets: lookups (`resolving`) can't hold a tile longer than `loadTimeout`; `KlipyResolver` waits at most 2 s for its saved cache and 8 s per search; a mobile preview still loading after 2 × `loadTimeout` falls back to the next option (`error()`).
+- Unverified on a device: that RN `fetch` HEAD exposes the redirected `res.url`, and that images-ext resizes proxied videos into animated webp.
+
 **Fixed and verified on 2026-11-16 (1.2.0, low-res for favourites):**
 - The queue effect's cleanup used to cancel a ticket as soon as it started loading (its deps include `phase`), so loading wasn't strictly sequential. Now only unstarted tickets are cancelled there; started ones are freed by finishing, parking (`drop`) or unmounting.
 - Unit tests (Bun) for proxy unwrapping, the Tenor codes and `KlipyResolver` (format fallback, caching of other results, misses, persistence) pass. Tenor URLs generated for the user's reported GIFs were fetched live: all 200; the webps are animated.

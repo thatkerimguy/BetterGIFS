@@ -23,9 +23,9 @@ import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import type { DiscordModules } from "@valenced/discord/types";
 import type { ReactNode } from "react";
 
-import { LoadedCache } from "./cache";
-import { KlipyResolver } from "./klipy";
-import { BoundedSet, isKlipyUrl, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, rewriteUrl, stillUrl } from "./lowres";
+import { LoadedCache, LruCache } from "./cache";
+import { KlipyResolver, wait } from "./klipy";
+import { BoundedSet, isKlipyUrl, isTenorMediaUrl, isTenorPageGif, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, type Ticket } from "./queue";
 import SettingsComponent from "./settings";
 import { DefaultSettings, getSettings, setStorage, type Settings, useSettings } from "./shared";
@@ -136,12 +136,84 @@ function klipyFormats(item: GifItem): string[] | null {
     if (!klipy || !klipyLookup || q === "original") return null;
     if (apiPreviews.has(`${q}:${item.id}`) || apiPreviews.has(`${q}:${item.url}`)) return null;
     if (!isKlipyUrl(item.src) || !klipy.canResolve(item.url)) return null;
-    const formats = klipyFavoriteFormats(isVideoUrl(item.src), selectedFormat(), q);
+    // Mobile tiles are always images, even when the favourite is a proxied video
+    const formats = klipyFavoriteFormats(false, selectedFormat(), q);
     return formats.length ? formats : null;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                        Tenor favourites on mobile                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Discord mobile shows Tenor favourites as `<tenor page URL>.gif`, which redirects
+ * to the full size GIF. Following the redirect once (HEAD, cached and saved) gives
+ * the media URL, and from that Tenor's small renditions.
+ */
+class TenorPageResolver {
+    /** page URL -> media URL, or "" when the redirect didn't lead to a Tenor media URL */
+    private cache = new LruCache<string, string>(5000);
+    private pending = new Map<string, Promise<void>>();
+    private saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+    constructor(private store?: { load(): Promise<Record<string, string> | undefined>; save(e: Record<string, string>): void; }) {
+        store?.load().then(entries => {
+            for (const [k, v] of Object.entries(entries ?? {})) if (typeof v === "string" && !this.cache.has(k)) this.cache.set(k, v);
+        }, () => { });
+    }
+
+    /** media URL, "" when unknown for good, undefined when not resolved yet */
+    peek(pageUrl: string) {
+        return this.cache.get(pageUrl);
+    }
+
+    resolve(pageUrl: string): Promise<void> {
+        if (this.cache.has(pageUrl)) return Promise.resolve();
+        const existing = this.pending.get(pageUrl);
+        if (existing) return existing;
+
+        const run = (async () => {
+            try {
+                const res = await Promise.race([
+                    fetch(pageUrl, { method: "HEAD" }),
+                    wait(8000).then(() => null),
+                ]);
+                if (!res) return; // timed out: try again next time
+                const media = normalizeUrl(res.url ?? "");
+                this.cache.set(pageUrl, isTenorMediaUrl(media) ? media : "");
+                this.scheduleSave();
+            } catch (e) {
+                logger?.warn?.("Couldn't resolve Tenor favourite", e);
+            }
+        })().finally(() => this.pending.delete(pageUrl));
+        this.pending.set(pageUrl, run);
+        return run;
+    }
+
+    private scheduleSave() {
+        if (!this.store || this.saveTimer) return;
+        this.saveTimer = setTimeout(() => this.flush(), 2000);
+    }
+
+    flush() {
+        if (this.saveTimer) clearTimeout(this.saveTimer);
+        this.saveTimer = undefined;
+        if (!this.store) return;
+        const out: Record<string, string> = {};
+        for (const [k, v] of this.cache.entries()) out[k] = v;
+        try { this.store.save(out); } catch { }
+    }
+}
+
+let tenorPages: TenorPageResolver | undefined;
+
 /** A pending lookup for `item`, or null when its preview URL is already known */
-function klipyLookupFor(item: GifItem): Promise<unknown> | null {
+function lookupFor(item: GifItem): Promise<unknown> | null {
+    const { quality: q } = getSettings();
+    if (q !== "original" && tenorPages && isTenorPageGif(item.src)) {
+        const page = normalizeUrl(item.src);
+        return tenorPages.peek(page) === undefined ? tenorPages.resolve(page) : null;
+    }
     const formats = klipyFormats(item);
     if (!formats || klipy!.peek(item.url, formats) !== undefined) return null;
     return klipy!.resolve(item.url!, formats);
@@ -161,15 +233,18 @@ function pickSrc(item: GifItem, still = false): string {
         }
         if (q === "original") return original;
 
+        // Tenor favourite shown as its page URL: work from the media URL it redirects to
+        const tenorMedia = isTenorPageGif(original) ? tenorPages?.peek(original) : undefined;
+
         const formats = klipyFormats(item);
         const low = apiPreviews.get(`${q}:${item.id}`)
             ?? apiPreviews.get(`${q}:${item.url}`)
             ?? (formats && klipy!.peek(item.url, formats))
-            ?? rewriteUrl(original, q, item);
+            ?? rewriteUrl(tenorMedia || original, q, item, { imagesOnly: true });
 
         if (!low || low === original || failed.has(low)) return original;
-        // Must stay the same media type or the picker would render it with the wrong element
-        if (isVideoUrl(low) !== isVideoUrl(original)) return original;
+        // Mobile tiles are images: an mp4/webm URL would never load
+        if (isVideoUrl(low)) return original;
         return low;
     } catch {
         return original;
@@ -453,10 +528,13 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
             order: () => indexRef.current ?? 0,
             start: () => {
                 started = true;
-                const lookup = klipyLookupFor(item);
+                const lookup = lookupFor(item);
                 if (!lookup) return begin();
                 setPhase("resolving");
-                lookup.then(() => !dropped.has(ticket) && begin());
+                // A lookup never holds a tile longer than the load timeout
+                Promise.race([lookup, wait(loadTimeout * 1000)])
+                    .catch(() => { })
+                    .then(() => !dropped.has(ticket) && begin());
             },
         };
         ticketRef.current = ticket;
@@ -516,6 +594,16 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
         if (ticketRef.current) queue.finish(ticketRef.current);
         setPhase("done");
     };
+
+    // A preview that neither loads nor fails (some image views never report either)
+    // falls back to the next option instead of spinning forever
+    const errorRef = useRef(error);
+    errorRef.current = error;
+    useEffect(() => {
+        if (phase !== "loading" || !chosen || chosen === original) return;
+        const t = setTimeout(() => errorRef.current(), loadTimeout * 2000);
+        return () => clearTimeout(t);
+    }, [phase, chosen]);
 
     const isImage = (n: any) => isValidElement(n) && normalizeUrl((n.props as any)?.source?.uri ?? "") === original;
 
@@ -587,6 +675,15 @@ export default plugin<{ jsonStorage: Settings; }>({
             pluginStoragePathFor(PLUGIN_ID, "klipy-previews.json"),
             { default: { entries: {} } },
         );
+        const tenorStore = getJsonStorage<{ entries: Record<string, string>; }>(
+            pluginStoragePathFor(PLUGIN_ID, "tenor-pages.json"),
+            { default: { entries: {} } },
+        );
+        tenorPages = new TenorPageResolver({
+            load: async () => (await tenorStore.get())?.entries,
+            save: entries => void tenorStore.set({ entries }, true),
+        });
+
         klipy = new KlipyResolver({
             async search(q, format, limit) {
                 if (!http) throw new Error("HTTP module not found yet");
@@ -606,6 +703,8 @@ export default plugin<{ jsonStorage: Settings; }>({
         cleanup(
             () => {
                 klipy?.flush();
+                tenorPages?.flush();
+                tenorPages = undefined;
                 klipy = undefined;
                 setStorage(undefined);
                 http = undefined;
