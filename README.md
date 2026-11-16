@@ -90,7 +90,7 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
    bun run build gif-picker-optimizer
    ```
 
-   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.2.0.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
+   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.2.1.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
 
 4. Load it in Valenced, either with `bun run serve` during development or by publishing the template repository as a plugin repository and adding its URL in Valenced.
 
