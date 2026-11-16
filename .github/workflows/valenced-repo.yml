@@ -103,6 +103,9 @@ jobs:
             --base-url "$BASE_URL/pool" \
             --out ../published/index.json
 
+      - name: Copy the landing page
+        run: cp src/valenced/site/index.html published/index.html
+
       - name: Push to ${{ env.POOL_BRANCH }}
         run: |
           set -euo pipefail
