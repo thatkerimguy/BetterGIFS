@@ -136,8 +136,14 @@ export class KlipyResolver {
         for (const r of results ?? []) {
             if (!r?.url || !r.src) continue;
             const low = normalizeUrl(r.src);
-            if (pageKey(r.url) === want) hit = low;
-            else if (!this.cache.has(this.key(format, r.url))) this.extra.set(this.key(format, r.url), low);
+            if (pageKey(r.url) === want) {
+                hit = low;
+                continue;
+            }
+            const key = this.key(format, r.url);
+            if (!this.cache.has(key)) this.extra.set(key, low);
+            // Saved as "no small version" by an earlier search: this one found it
+            else if (this.cache.get(key) === "") this.cache.set(key, low);
         }
         this.cache.set(this.key(format, pageUrl), hit ?? "");
         this.scheduleSave();

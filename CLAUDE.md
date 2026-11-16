@@ -95,6 +95,16 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Verified vs unverified
 
+**Fixed on 2026-11-16 (1.4.1, code review findings):**
+- Desktop `ViewportWatcher` leaked an IntersectionObserver pair per picker open (each holding the closed picker's DOM through its root). Observers are now reference counted and disconnected with their last element.
+- Desktop Klipy lookups race `loadTimeout` like mobile, so a long serial lookup chain can't keep tiles spinning.
+- `KlipyResolver.search` replaces a saved miss ("") when a later search returns that GIF.
+- Desktop favourites only: `componentDidMount` is patched to `$self.mountCategories(trendingCategories, fetch)`, which keeps Discord's fetch action. If the option is turned off while the picker is open, `needsCategories` starts the fetch (outside render) instead of showing the skeleton forever.
+- A ticket `start()` that throws now falls back to loading the original instead of leaving the tile queued forever (both builds).
+- Mobile `TenorPageResolver` remembers failed lookups (network error, timeout) for 5 minutes in memory, so remounting tiles don't fire a HEAD request each time.
+- `loaded` is resized when the setting changes (Vencord `onChange`; mobile: an effect in `OptimizedResultsList`), not in every tile render.
+- Mobile favourites-only hint only suggests starring GIFs when there are no favourites (a picker with `hideFavorites` has none to show).
+
 **Changed on 2026-11-16 (1.4.0, favourites only keeps the main page + smaller caches):**
 - `favoritesOnly` no longer replaces the main page with the favourites list (the user wants the normal main page, with search and the Favorites category, minus the featured categories).
   - Desktop: three replacements in the `"hideFavoritesTile:"` module's categories component `k`: `componentDidMount` only fetches trending when `$self.needsCategories(...)`, `getData` uses `$self.featured(trendingCategories)` (a stable empty array when on), and `renderContent` shows the loading skeleton only when `needsCategories`. The old `frontPage` patch is gone. Regexes were tested against a hand-minified copy of the chunk.

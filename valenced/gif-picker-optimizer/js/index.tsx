@@ -159,6 +159,8 @@ class TenorPageResolver {
     /** page URL -> media URL, or "" when the redirect didn't lead to a Tenor media URL */
     private cache = new LruCache<string, string>(5000);
     private pending = new Map<string, Promise<void>>();
+    /** page URL -> when its lookup last failed (network error or timeout). Not saved. */
+    private failedAt = new LruCache<string, number>(500);
     private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
     constructor(private store?: { load(): Promise<Record<string, string> | undefined>; save(e: Record<string, string>): void; }) {
@@ -172,8 +174,14 @@ class TenorPageResolver {
         return this.cache.get(pageUrl);
     }
 
+    /** Whether the last lookup of `pageUrl` failed less than 5 minutes ago */
+    recentlyFailed(pageUrl: string) {
+        const at = this.failedAt.get(pageUrl);
+        return at != null && Date.now() - at < 5 * 60_000;
+    }
+
     resolve(pageUrl: string): Promise<void> {
-        if (this.cache.has(pageUrl)) return Promise.resolve();
+        if (this.cache.has(pageUrl) || this.recentlyFailed(pageUrl)) return Promise.resolve();
         const existing = this.pending.get(pageUrl);
         if (existing) return existing;
 
@@ -183,11 +191,16 @@ class TenorPageResolver {
                     fetch(pageUrl, { method: "HEAD" }),
                     wait(8000).then(() => null),
                 ]);
-                if (!res) return; // timed out: try again next time
+                if (!res) {
+                    // Timed out: try again later
+                    this.failedAt.set(pageUrl, Date.now());
+                    return;
+                }
                 const media = normalizeUrl(res.url ?? "");
                 this.cache.set(pageUrl, isTenorMediaUrl(media) ? media : "");
                 this.scheduleSave();
             } catch (e) {
+                this.failedAt.set(pageUrl, Date.now());
                 logger?.warn?.("Couldn't resolve Tenor favourite", e);
             }
         })().finally(() => this.pending.delete(pageUrl));
@@ -217,7 +230,7 @@ function lookupFor(item: GifItem): Promise<unknown> | null {
     const { quality: q } = getSettings();
     if (q !== "original" && tenorPages && isTenorPageGif(item.src)) {
         const page = normalizeUrl(item.src);
-        return tenorPages.peek(page) === undefined ? tenorPages.resolve(page) : null;
+        return tenorPages.peek(page) === undefined && !tenorPages.recentlyFailed(page) ? tenorPages.resolve(page) : null;
     }
     const formats = klipyFormats(item);
     if (!formats || klipy!.peek(item.url, formats) !== undefined) return null;
@@ -324,6 +337,10 @@ const isFlashList = (n: any) =>
 /** Wraps Discord's GIF results list to track which items are on screen */
 function OptimizedResultsList({ props, render }: { props: ResultsListProps; render: (p: ResultsListProps) => ReactNode; }) {
     const store = useMemo(() => new ViewportStore(), []);
+    const { cacheSize } = useSettings();
+    useEffect(() => {
+        if (loaded.max !== cacheSize) loaded.resize(cacheSize);
+    }, [cacheSize]);
     const tree = render(props);
 
     const originalCb = useRef<((info: any) => void) | null>(null);
@@ -354,6 +371,7 @@ type AnyComponent = (props: any) => ReactNode;
 type Memo = { type: AnyComponent; };
 
 interface PickerUtils {
+    useFavoriteGIFsMobile?: () => { favorites?: unknown[]; };
     GIF_PICKER_GUTTER_SPACING?: number;
     GIF_PICKER_ITEM_ESIMTATED_HEIGHT?: number;
 }
@@ -411,6 +429,36 @@ function DeferredPicker({ props }: { props: Record<string, unknown>; }) {
 }
 
 /**
+ * Shown on the main page when there's no Favorites category: either there are
+ * no favourites yet, or this picker hides them (then starring is no help).
+ */
+function MainPageHint() {
+    const useFavorites = pickerUtils?.useFavoriteGIFsMobile;
+    return typeof useFavorites === "function"
+        ? <MainPageHintWithFavorites useFavorites={useFavorites} />
+        : <HintText text="Search for GIFs above." />;
+}
+
+function MainPageHintWithFavorites({ useFavorites }: { useFavorites: NonNullable<PickerUtils["useFavoriteGIFsMobile"]>; }) {
+    const count = useFavorites()?.favorites?.length ?? 0;
+    return (
+        <HintText
+            text={count > 0
+                ? "Search for GIFs above."
+                : "Search for GIFs above. Tap the star on a GIF to add it to your favourites."}
+        />
+    );
+}
+
+function HintText({ text }: { text: string; }) {
+    return (
+        <View style={styles.favoritesEmpty}>
+            <Design.Text variant="text-md/medium" color="text-muted">{text}</Design.Text>
+        </View>
+    );
+}
+
+/**
  * The picker's main page, with only the Favorites category: no Trending GIFs or
  * other featured categories. It also skips their request and animated previews.
  * Search (all GIFs) and the Favorites category (search inside favourites) work
@@ -430,15 +478,7 @@ function CategoriesPage({ props }: { props: CategoriesPageProps; }) {
     const height = columns > 2 ? fullHeight : fullHeight / 2;
     const favorites = props.favoritesCategory;
 
-    if (!favorites) {
-        return (
-            <View style={styles.favoritesEmpty}>
-                <Design.Text variant="text-md/medium" color="text-muted">
-                    Search for GIFs above. Tap the star on a GIF to add it to your favourites.
-                </Design.Text>
-            </View>
-        );
-    }
+    if (!favorites) return <MainPageHint />;
 
     return (
         <View style={styles.favoritesOnly}>
@@ -597,8 +637,7 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
     const tree = render(props);
 
     const { item, index } = props;
-    const { sequential, concurrency, loadTimeout, showProgress, unloadOffscreen, offscreenBuffer, cacheSize, stillFavorites } = useSettings();
-    if (loaded.max !== cacheSize) loaded.resize(cacheSize);
+    const { sequential, concurrency, loadTimeout, showProgress, unloadOffscreen, offscreenBuffer, stillFavorites } = useSettings();
     const still = stillFavorites && isFavoriteItem(item);
 
     const [chosen, setChosen] = useState<string | null>(() => {
@@ -655,13 +694,20 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
             order: () => indexRef.current ?? 0,
             start: () => {
                 started = true;
-                const lookup = lookupFor(item);
-                if (!lookup) return begin();
-                setPhase("resolving");
-                // A lookup never holds a tile longer than the load timeout
-                Promise.race([lookup, wait(loadTimeout * 1000)])
-                    .catch(() => { })
-                    .then(() => !dropped.has(ticket) && begin());
+                try {
+                    const lookup = lookupFor(item);
+                    if (!lookup) return begin();
+                    setPhase("resolving");
+                    // A lookup never holds a tile longer than the load timeout
+                    Promise.race([lookup, wait(loadTimeout * 1000)])
+                        .catch(() => { })
+                        .then(() => !dropped.has(ticket) && begin());
+                } catch (e) {
+                    logger?.error?.("Couldn't start loading a GIF", e);
+                    setChosen(normalizeUrl(item.src));
+                    setProgress(null);
+                    setPhase("loading");
+                }
             },
         };
         ticketRef.current = ticket;

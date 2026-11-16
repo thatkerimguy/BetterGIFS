@@ -23,7 +23,7 @@ import { GIFPickerViewStore, LocaleStore, RestAPI, useCallback, useEffect, useRe
 import type { ComponentType, MouseEvent, ReactNode } from "react";
 
 import { LoadedCache, LruCache } from "./cache";
-import { KlipyResolver } from "./klipy";
+import { KlipyResolver, wait } from "./klipy";
 import { BoundedSet, isKlipyUrl, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, Ticket } from "./queue";
 import managedStyle from "./styles.css?managed";
@@ -94,6 +94,7 @@ const settings = definePluginSettings({
         markers: [300, 1000, 3000],
         default: 1000,
         stickToMarkers: true,
+        onChange: (size: number) => loaded.resize(size),
     },
     stillFavorites: {
         type: OptionType.BOOLEAN,
@@ -121,6 +122,13 @@ const failed = new BoundedSet<string>(600);
 const apiPreviews = new LruCache<string, string>(1200);
 /** Stable empty list, so memoized category data doesn't change on every render */
 const NO_CATEGORIES: never[] = [];
+/** Discord's "fetch trending categories" action, from the open picker's main page */
+let fetchCategories: (() => void) | undefined;
+let categoriesRequested = false;
+
+function needsCategories(categories: unknown[] | undefined) {
+    return !settings.store.favoritesOnly && (categories?.length ?? 0) === 0;
+}
 /** Looks up small versions of Klipy favourites */
 const KLIPY_STORE_KEY = "GifPickerOptimizer_klipyPreviews";
 let klipy: KlipyResolver | undefined;
@@ -287,15 +295,22 @@ function findScroller(el: Element): Element | null {
  * `rootMargin` would do nothing, because the scroller clips the tiles first.
  */
 class ViewportWatcher {
-    private observers = new Map<string, { root: Element | null; io: IntersectionObserver; }>();
+    /**
+     * One observer per scroller and margin, counting the elements it watches.
+     * The picker's scroller is a new element every time the picker opens, so an
+     * observer is disconnected and dropped with its last element. Kept, it would
+     * hold the closed picker's whole DOM in memory.
+     */
+    private observers = new Map<string, { io: IntersectionObserver; count: number; }>();
     private callbacks = new Map<Element, (isIntersecting: boolean) => void>();
-    private observerOf = new Map<Element, IntersectionObserver>();
+    private keyOf = new Map<Element, string>();
     private rootIds = new WeakMap<Element, number>();
     private nextRootId = 1;
 
     constructor(private margin: () => number) { }
 
     observe(el: Element, cb: (isIntersecting: boolean) => void) {
+        if (this.keyOf.has(el)) this.unobserve(el);
         const root = findScroller(el);
         const margin = this.margin();
         let rootId = 0;
@@ -310,26 +325,35 @@ class ViewportWatcher {
             const io = new IntersectionObserver(entries => {
                 for (const e of entries) this.callbacks.get(e.target)?.(e.isIntersecting);
             }, { root, rootMargin: `${margin}px 0px` });
-            entry = { root, io };
+            entry = { io, count: 0 };
             this.observers.set(key, entry);
         }
 
+        entry.count++;
         this.callbacks.set(el, cb);
-        this.observerOf.set(el, entry.io);
+        this.keyOf.set(el, key);
         entry.io.observe(el);
     }
 
     unobserve(el: Element) {
         this.callbacks.delete(el);
-        this.observerOf.get(el)?.unobserve(el);
-        this.observerOf.delete(el);
+        const key = this.keyOf.get(el);
+        if (key == null) return;
+        this.keyOf.delete(el);
+        const entry = this.observers.get(key);
+        if (!entry) return;
+        entry.io.unobserve(el);
+        if (--entry.count <= 0) {
+            entry.io.disconnect();
+            this.observers.delete(key);
+        }
     }
 
     disconnect() {
         for (const { io } of this.observers.values()) io.disconnect();
         this.observers.clear();
         this.callbacks.clear();
-        this.observerOf.clear();
+        this.keyOf.clear();
     }
 }
 
@@ -665,12 +689,11 @@ function SequentialResultInner(props: ResultProps) {
     const { item, src, coords } = rest;
     const {
         sequential, concurrency, prioritizeVisible, loadTimeout, showProgress,
-        unloadOffscreen, cacheSize, stillFavorites,
+        unloadOffscreen, stillFavorites,
     } = settings.use([
         "sequential", "concurrency", "prioritizeVisible", "loadTimeout", "showProgress", "quality",
-        "unloadOffscreen", "offscreenMargin", "cacheSize", "stillFavorites",
+        "unloadOffscreen", "offscreenMargin", "stillFavorites",
     ]);
-    if (loaded.max !== cacheSize) loaded.resize(cacheSize);
 
     const still = stillFavorites && isFavorites(resultType, item);
     /** The URL this tile shows, for the current mode */
@@ -728,10 +751,19 @@ function SequentialResultInner(props: ResultProps) {
             order: () => indexRef.current ?? 0,
             start: () => {
                 started = true;
-                const lookup = klipyLookupFor(item, src);
-                if (!lookup) return begin();
-                setPhase("resolving");
-                lookup.then(() => !dropped.has(ticket) && begin());
+                try {
+                    const lookup = klipyLookupFor(item, src);
+                    if (!lookup) return begin();
+                    setPhase("resolving");
+                    // A lookup never holds a tile longer than the load timeout
+                    Promise.race([lookup, wait(loadTimeout * 1000)])
+                        .catch(() => { })
+                        .then(() => !dropped.has(ticket) && begin());
+                } catch (e) {
+                    logger.error("Couldn't start loading a GIF", e);
+                    setChosen(normalizeUrl(src));
+                    setPhase("loading");
+                }
             },
         };
         ticketRef.current = ticket;
@@ -890,8 +922,8 @@ export default definePlugin({
             replacement: [
                 {
                     // Don't fetch trending categories on mount
-                    match: /0===this\.props\.trendingCategories\.length&&/,
-                    replace: "$self.needsCategories(this.props.trendingCategories)&&",
+                    match: /0===this\.props\.trendingCategories\.length&&\(0,(\i\.\i)\)\(\)/,
+                    replace: "$self.mountCategories(this.props.trendingCategories,$1)",
                 },
                 {
                     // The tiles: [favorites, ...trendingCategories]
@@ -920,9 +952,30 @@ export default definePlugin({
         return settings.store.favoritesOnly ? NO_CATEGORIES : categories;
     },
 
-    /** Whether the main page still has to fetch (and wait for) featured categories */
+    /** The main page mounted: fetch featured categories unless they're hidden or loaded */
+    mountCategories(categories: unknown[] | undefined, fetch: () => void) {
+        fetchCategories = fetch;
+        categoriesRequested = false;
+        if (needsCategories(categories)) {
+            categoriesRequested = true;
+            fetch();
+        }
+    },
+
+    /**
+     * Whether the main page waits (loading skeleton) for featured categories.
+     * When they're needed but were skipped on mount (the option was turned off
+     * while the picker was open), this starts the fetch.
+     */
     needsCategories(categories: unknown[] | undefined): boolean {
-        return !settings.store.favoritesOnly && (categories?.length ?? 0) === 0;
+        const needed = needsCategories(categories);
+        if (needed && !categoriesRequested && fetchCategories) {
+            categoriesRequested = true;
+            const fetch = fetchCategories;
+            // Not during render: fetching dispatches
+            setTimeout(() => fetch(), 0);
+        }
+        return needed;
     },
 
     start() {
