@@ -1,0 +1,31 @@
+{
+  "format": 1,
+  "name": "BetterGIFS",
+  "description": "GifPickerOptimizer for Valenced: sequential loading, low resolution previews, off-screen unloading and still favourites in the GIF picker.",
+  "plugins": {
+    "thatkerimguy.gif-picker-optimizer": {
+      "name": "GifPickerOptimizer",
+      "description": "Loads GIFs in the picker one by one with a progress indicator, shows low resolution previews while still sending the full resolution GIF, and unloads off-screen GIFs so big favourite libraries stay smooth.",
+      "author": "thatkerimguy (https://github.com/thatkerimguy \"GitHub\")",
+      "icon": "GifIcon",
+      "channels": {
+        "latest": "1.1.0"
+      },
+      "versions": {
+        "1.1.0": {
+          "url": "https://thatkerimguy.github.io/BetterGIFS/pool/thatkerimguy.gif-picker-optimizer@1.1.0.zip",
+          "sha256": "5679f81aab164c8bd01d104e63ae6399aa29755b79ac0e8202bc4187df4b0928",
+          "size": 7938,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        }
+      }
+    }
+  }
+}
