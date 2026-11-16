@@ -1,4 +1,4 @@
-# BetterGIFS — handoff notes
+# KerimsPluginRepo — handoff notes
 
 GifPickerOptimizer: a Discord GIF picker plugin with two builds.
 
@@ -94,6 +94,16 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 A preview is only used if it's the same media type as the original (video stays video, image stays image), because H renders based on `format`.
 
 ## Verified vs unverified
+
+**Changed on 2026-11-16 (1.5.0, second review + cache reset; repo renamed):**
+- The GitHub repo is now `thatkerimguy/KerimsPluginRepo`; the Valenced repository URL is `https://thatkerimguy.github.io/KerimsPluginRepo/index.json` (the old BetterGIFS Pages URL stops working; users re-add the new one).
+- Klipy favourite lookups (`klipyFormats`) only run for favourites (`isFavoriteItem`). Search/trending results get previews from `lookupLowRes` only; before, at S/SD on mobile every Klipy result did its own `/gifs/search`.
+- `KlipyResolver` skips a media_format for the session after 2 failed searches in a row if it never worked (`usable()`), in both `resolve` and `peek`.
+- Saves wait for the saved cache to load (`loadDone`): Klipy and mobile Tenor saves replace the whole file, so saving earlier could drop saved entries.
+- A preview shown from the `loaded` cache that fails now falls back like a fresh load: mobile handles `onError` in phase `done`; desktop keeps `LoadOverlay` mounted (quietly) for previews in phase `done`.
+- Desktop `offscreenMargin` has `onChange: () => nearWatcher.refresh()`, which re-observes mounted tiles with the new margin.
+- Mobile favourites-only hint is a plain "Search for GIFs above." (no favourites hook).
+- Cache settings: `LruCache.approxBytes()` (strings + 200 B per entry, from the Bun measurements), `KlipyResolver.stats()/clear()` (clear also saves `{}` and ignores a load still in flight via `generation`), mobile `TenorPageResolver.stats()/clear()`. Mobile settings read them through `cacheControl` in `shared.ts`; Vencord has an `OptionType.COMPONENT` setting (`CacheSettings`) refreshed every 2 s. Reset doesn't touch Discord's own image cache.
 
 **Fixed on 2026-11-16 (1.4.1, code review findings):**
 - Desktop `ViewportWatcher` leaked an IntersectionObserver pair per picker open (each holding the closed picker's DOM through its root). Observers are now reference counted and disconnected with their last element.

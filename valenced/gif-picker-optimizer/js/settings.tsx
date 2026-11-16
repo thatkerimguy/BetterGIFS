@@ -1,14 +1,15 @@
 import Page from "@valenced/components/Page";
 import { Design } from "@valenced/discord/design";
+import { useEffect, useState } from "react";
 import { ScrollView } from "react-native";
 
 import type { PluginSettingsComponent } from "@valenced/plugins/types";
 import type { ComponentProps } from "react";
 
 import type { Quality } from "./lowres";
-import { DefaultSettings, type Settings } from "./shared";
+import { cacheControl, DefaultSettings, type Settings } from "./shared";
 
-const { Stack, TableRadioGroup, TableRadioRow, TableRowGroup, TableSwitchRow } = Design;
+const { Stack, TableRadioGroup, TableRadioRow, TableRow, TableRowGroup, TableSwitchRow } = Design;
 
 const qualities: { value: Quality; label: string; subLabel: string; }[] = [
     { value: "xs", label: "XS", subLabel: "Smallest previews, fastest loading" },
@@ -31,6 +32,36 @@ const cacheSizes = [
 ];
 
 type Props = ComponentProps<PluginSettingsComponent<{ jsonStorage: Settings; }>>;
+
+/** Cache stats (refreshed every 2 seconds while open) and a reset button */
+function CacheSection() {
+    const [, setTick] = useState(0);
+    useEffect(() => {
+        const t = setInterval(() => setTick(n => n + 1), 2000);
+        return () => clearInterval(t);
+    }, []);
+
+    const stats = cacheControl.stats?.();
+    const reset = cacheControl.reset;
+
+    return (
+        <TableRowGroup title="Cache">
+            {stats
+                ? stats.map(s => <TableRow key={s.label} label={s.label} subLabel={s.value} />)
+                : <TableRow label="Enable the plugin to see its cache" />}
+            <TableRow
+                label="Reset cache"
+                subLabel="Forgets loaded GIFs, previews and the saved Klipy and Tenor lookups. Discord's own image cache isn't touched."
+                variant="danger"
+                disabled={!reset}
+                onPress={() => {
+                    reset?.();
+                    setTick(n => n + 1);
+                }}
+            />
+        </TableRowGroup>
+    );
+}
 
 export default function SettingsComponent({ api: { jsonStorage: storage } }: Props) {
     const s: Settings = { ...DefaultSettings, ...storage.use() };
@@ -138,6 +169,8 @@ export default function SettingsComponent({ api: { jsonStorage: storage } }: Pro
                             <TableRadioRow key={t} label={`${t} seconds`} value={String(t)} />
                         ))}
                     </TableRadioGroup>
+
+                    <CacheSection />
                 </Stack>
             </ScrollView>
         </Page>

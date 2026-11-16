@@ -6,6 +6,7 @@ A plugin for **Vencord** (desktop/web) and **Valenced** (mobile) that changes Di
 - **Loading indicator.** Empty tiles show a pulsing ring while they wait their turn. While a tile loads it shows a spinner, or a percentage when the download size is known.
 - **Low-resolution previews.** The picker shows an XS, S or SD version of each GIF. Clicking, tapping or favouriting a GIF still uses Discord's original item, so chat and your favourites always get the full-resolution GIF.
 - **Small memory footprint.** The plugin's caches are bounded: a few MB of URLs at most, plus up to 24 MB of still frames on desktop (only with still favourites on), captured at tile size.
+- **Cache stats and reset.** The plugin's settings show what's cached (remembered GIFs, saved Klipy and Tenor lookups, still frames) and about how much memory it uses, with a button to reset it.
 - **Off-screen unloading with caching.** GIFs you scroll far away from are unloaded, which frees memory and video decoders. When you scroll back they show again straight from cache, without waiting in the load queue. GIFs that are off screen and haven't loaded yet don't download at all. This keeps big favourite libraries smooth on both desktop and mobile.
 - **Still favourites (optional, off by default).** The favourites tab shows still images instead of playing GIFs. The GIF you send still animates.
 - **Favourites only (optional, off by default).** Hides Trending GIFs and the other featured categories from the GIF picker's main page. The main page keeps the search bar (all GIFs) and the Favorites category, which opens your favourites with their own search, like normal Discord. The featured categories aren't fetched at all.
@@ -62,7 +63,7 @@ Enable **GifPickerOptimizer** in Settings → Vencord → Plugins. The default q
 Add this URL as a plugin repository in Valenced, then install **GifPickerOptimizer** from it:
 
 ```
-https://thatkerimguy.github.io/BetterGIFS/index.json
+https://thatkerimguy.github.io/KerimsPluginRepo/index.json
 ```
 
 Updates come through the same repository. The `Publish Valenced repository` workflow publishes it to GitHub Pages: on every push to `main` that changes `valenced/`, it builds any plugin whose `manifest.json` version isn't published yet. To release a change, bump `version` in `valenced/gif-picker-optimizer/manifest.json`.
@@ -93,7 +94,7 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
    bun run build gif-picker-optimizer
    ```
 
-   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.4.1.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
+   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.5.0.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
 
 4. Load it in Valenced, either with `bun run serve` during development or by publishing the template repository as a plugin repository and adding its URL in Valenced.
 

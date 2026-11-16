@@ -365,6 +365,8 @@ export function klipyFavoriteFormats(originalIsVideo: boolean, selectedFormat: s
 export class BoundedSet<T> {
     private set = new Set<T>();
     constructor(private max: number) { }
+    get size() { return this.set.size; }
+    values() { return this.set.values(); }
     has(v: T) { return this.set.has(v); }
     add(v: T) {
         this.set.delete(v);

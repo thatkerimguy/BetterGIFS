@@ -72,6 +72,13 @@ export class LruCache<K, V> {
         return this.map.entries();
     }
 
+    /** Rough memory used by the keys and values (for the cache stats in settings) */
+    approxBytes() {
+        let n = 0;
+        for (const [k, v] of this.map) n += approxSize(k) + approxSize(v) + ENTRY_OVERHEAD_BYTES;
+        return n;
+    }
+
     /** Changes the limit, evicting the oldest entries if needed */
     resize(max: number) {
         this.max = max;
@@ -98,6 +105,26 @@ export class LruCache<K, V> {
             this.onEvict?.(key, value);
         }
     }
+}
+
+/**
+ * Per-entry overhead of a Map entry with two small heap objects, measured in
+ * Bun with realistic GIF URLs (about 200 bytes besides the strings themselves).
+ */
+const ENTRY_OVERHEAD_BYTES = 200;
+
+/** Rough size of a cached key or value. Strings of URLs are 1 byte per character. */
+export function approxSize(v: unknown): number {
+    if (typeof v === "string") return v.length;
+    if (typeof v === "number") return 8;
+    return 0;
+}
+
+/** "12 KB", "3.4 MB" */
+export function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${Math.round(bytes)} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /**

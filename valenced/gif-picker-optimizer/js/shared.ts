@@ -39,6 +39,18 @@ export const DefaultSettings: Settings = {
     favoritesOnly: false,
 };
 
+/** One line of cache stats in settings */
+export interface CacheStat {
+    label: string;
+    value: string;
+}
+
+/** Set by the plugin while it runs, so settings can show stats and reset the caches */
+export const cacheControl: {
+    stats?: () => CacheStat[];
+    reset?: () => void;
+} = {};
+
 let storage: JsonStorage<Settings> | undefined;
 
 export function setStorage(s: JsonStorage<Settings> | undefined) {

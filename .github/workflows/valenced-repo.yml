@@ -1,7 +1,7 @@
 # Publishes the Valenced plugins under valenced/ as a Valenced plugin repository on
 # GitHub Pages (the gh-pages branch): pool/<id>@<version>.zip plus index.json.
 #
-# Add https://thatkerimguy.github.io/BetterGIFS/index.json as a repository in Valenced.
+# Add https://thatkerimguy.github.io/KerimsPluginRepo/index.json as a repository in Valenced.
 #
 # A version is published once. To release a change, bump "version" in the plugin's
 # manifest.json. Published ZIPs are never rebuilt, so their SHA-256 in index.json stays valid.
@@ -29,7 +29,7 @@ concurrency:
 env:
   # Valenced/valenced-plugin-template commit the build was tested with
   TEMPLATE_REF: 9a4f9187137a75d86fe552d0e594889a6e6fd7e5
-  BASE_URL: https://thatkerimguy.github.io/BetterGIFS
+  BASE_URL: https://thatkerimguy.github.io/KerimsPluginRepo
   POOL_BRANCH: gh-pages
 
 jobs:

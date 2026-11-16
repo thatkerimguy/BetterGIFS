@@ -15,14 +15,17 @@
 
 import * as DataStore from "@api/DataStore";
 import { definePluginSettings } from "@api/Settings";
+import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { classNameFactory } from "@utils/css";
 import { Logger } from "@utils/Logger";
 import definePlugin, { makeRange, OptionType } from "@utils/types";
 import { GIFPickerViewStore, LocaleStore, RestAPI, useCallback, useEffect, useRef, useState } from "@webpack/common";
 import type { ComponentType, MouseEvent, ReactNode } from "react";
 
-import { LoadedCache, LruCache } from "./cache";
+import { formatBytes, LoadedCache, LruCache } from "./cache";
 import { KlipyResolver, wait } from "./klipy";
 import { BoundedSet, isKlipyUrl, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, Ticket } from "./queue";
@@ -87,6 +90,7 @@ const settings = definePluginSettings({
         markers: [200, 400, 800, 1200, 2000],
         default: 800,
         stickToMarkers: true,
+        onChange: () => nearWatcher.refresh(),
     },
     cacheSize: {
         type: OptionType.SLIDER,
@@ -100,6 +104,10 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Show still images instead of playing GIFs in the favourites tab. Sent GIFs still animate.",
         default: false,
+    },
+    cache: {
+        type: OptionType.COMPONENT,
+        component: () => <CacheSettings />,
     },
     favoritesOnly: {
         type: OptionType.BOOLEAN,
@@ -214,6 +222,8 @@ async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
 function klipyFormats(item: GifItem, src: string): string[] | null {
     const q = quality();
     if (!klipy || !settings.store.klipyLookup || q === "original") return null;
+    // Search and trending results get small versions from lookupLowRes, in one request per page
+    if (!isFavoriteItem(item)) return null;
     if (apiPreviews.has(`${q}:${item.id}`) || apiPreviews.has(`${q}:${item.url}`)) return null;
     if (!isKlipyUrl(src) || !klipy.canResolve(item.url)) return null;
     const formats = klipyFavoriteFormats(isVideoUrl(src), GIFPickerViewStore.getSelectedFormat(), q);
@@ -258,10 +268,14 @@ function pickStill(item: GifItem, src: string): StillSource {
     return { url: pickSrc(item, src), capture: true };
 }
 
+/** Favourites come from the frecency settings: they have an `order` and no `id` */
+function isFavoriteItem(item: GifItem) {
+    return typeof item.order === "number" && item.id == null;
+}
+
 function isFavorites(resultType: unknown, item: GifItem) {
     if (typeof resultType === "string" && /favou?rite/i.test(resultType)) return true;
-    // Favourites come from the frecency settings: they have an `order` and no `id`
-    return typeof item.order === "number" && item.id == null;
+    return isFavoriteItem(item);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -347,6 +361,11 @@ class ViewportWatcher {
             entry.io.disconnect();
             this.observers.delete(key);
         }
+    }
+
+    /** Observes everything again, with the current margin */
+    refresh() {
+        for (const [el, cb] of [...this.callbacks]) this.observe(el, cb);
     }
 
     disconnect() {
@@ -815,8 +834,10 @@ function SequentialResultInner(props: ResultProps) {
         if (chosen && chosen !== original) {
             // Still / preview not available: try the next best one, then the original
             failed.add(chosen);
+            loaded.delete(chosen);
             const next = pick();
             setChosen(next !== chosen ? next : original);
+            if (phase === "done") setPhase("loading");
             return;
         }
         if (ticketRef.current) queue.finish(ticketRef.current);
@@ -877,11 +898,12 @@ function SequentialResultInner(props: ResultProps) {
                     {rest.renderExtras?.(it)}
                     {/* Fills the tile, so the viewport watcher can see Discord's tile */}
                     <div ref={viewRef} className={cl("sentinel")} aria-hidden="true" />
-                    {phase === "loading" && (
+                    {/* Also for a preview shown from cache, which may not load any more */}
+                    {(phase === "loading" || shown !== original) && (
                         <LoadOverlay
                             src={shown}
                             video={video}
-                            showProgress={showProgress}
+                            showProgress={showProgress && phase === "loading"}
                             onDone={onDone}
                             onError={onError}
                         />
@@ -889,6 +911,77 @@ function SequentialResultInner(props: ResultProps) {
                 </>
             )}
         />
+    );
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Cache settings                                */
+/* -------------------------------------------------------------------------- */
+
+/** Rough memory of the failed preview list */
+function failedBytes() {
+    let n = 0;
+    for (const url of failed.values()) n += url.length + 100;
+    return n;
+}
+
+function cacheStats() {
+    const k = klipy?.stats() ?? { saved: 0, recent: 0, bytes: 0 };
+    const memory = loaded.approxBytes() + apiPreviews.approxBytes() + failedBytes() + k.bytes + frames.weight;
+    return [
+        { label: "Loaded GIFs remembered", value: `${loaded.size} of ${loaded.max}` },
+        { label: "Klipy favourite lookups (saved)", value: `${k.saved}, plus ${k.recent} recent search results` },
+        { label: "Search result previews", value: String(apiPreviews.size) },
+        { label: "Previews that failed", value: String(failed.size) },
+        { label: "Still frames", value: `${frames.size} (${formatBytes(frames.weight)} of ${formatBytes(FRAME_BUDGET_BYTES)})` },
+        { label: "Memory used", value: `About ${formatBytes(memory)}` },
+    ];
+}
+
+/** Clears every cache, also the saved Klipy lookups. Tiles look things up again. */
+function resetCaches() {
+    loaded.clear();
+    failed.clear();
+    apiPreviews.clear();
+    frames.clear();
+    if (klipy) klipy.clear();
+    else void DataStore.del(KLIPY_STORE_KEY);
+}
+
+function CacheSettings() {
+    const [, setTick] = useState(0);
+    useEffect(() => {
+        const t = setInterval(() => setTick(n => n + 1), 2000);
+        return () => clearInterval(t);
+    }, []);
+
+    return (
+        <section className={cl("cache")}>
+            <Heading>Cache</Heading>
+            <table className={cl("cache-stats")}>
+                <tbody>
+                    {cacheStats().map(s => (
+                        <tr key={s.label}>
+                            <td><Paragraph>{s.label}</Paragraph></td>
+                            <td><Paragraph>{s.value}</Paragraph></td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            <Button
+                variant="dangerSecondary"
+                size="small"
+                onClick={() => {
+                    resetCaches();
+                    setTick(n => n + 1);
+                }}
+            >
+                Reset cache
+            </Button>
+            <Paragraph className={cl("cache-note")}>
+                Forgets loaded GIFs, previews, still frames and the saved Klipy lookups. Discord's own image cache isn't touched.
+            </Paragraph>
+        </section>
     );
 }
 

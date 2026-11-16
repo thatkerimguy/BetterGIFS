@@ -24,12 +24,12 @@ import { Design } from "@valenced/discord/design";
 import type { DiscordModules } from "@valenced/discord/types";
 import type { ReactNode } from "react";
 
-import { LoadedCache, LruCache } from "./cache";
+import { formatBytes, LoadedCache, LruCache } from "./cache";
 import { KlipyResolver, wait } from "./klipy";
 import { BoundedSet, isKlipyUrl, isTenorMediaUrl, isTenorPageGif, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, type Ticket } from "./queue";
 import SettingsComponent from "./settings";
-import { DefaultSettings, getSettings, setStorage, type Settings, useSettings } from "./shared";
+import { type CacheStat, cacheControl, DefaultSettings, getSettings, setStorage, type Settings, useSettings } from "./shared";
 
 const PLUGIN_ID = "thatkerimguy.gif-picker-optimizer";
 const ITEM_VIEW_PATH = "modules/gif_picker/native/GIFPickerItemView.tsx";
@@ -139,6 +139,8 @@ function selectedFormat() {
 function klipyFormats(item: GifItem): string[] | null {
     const { quality: q, klipyLookup } = getSettings();
     if (!klipy || !klipyLookup || q === "original") return null;
+    // Search and trending results get small versions from lookupLowRes, in one request per page
+    if (!isFavoriteItem(item)) return null;
     if (apiPreviews.has(`${q}:${item.id}`) || apiPreviews.has(`${q}:${item.url}`)) return null;
     if (!isKlipyUrl(item.src) || !klipy.canResolve(item.url)) return null;
     // Mobile tiles are always images, even when the favourite is a proxied video
@@ -162,16 +164,44 @@ class TenorPageResolver {
     /** page URL -> when its lookup last failed (network error or timeout). Not saved. */
     private failedAt = new LruCache<string, number>(500);
     private saveTimer: ReturnType<typeof setTimeout> | undefined;
+    /** Saving replaces the saved file, so it waits until the file was read */
+    private loadDone = false;
+    private dirty = false;
+    /** Bumped by `clear()`, so a load that finishes afterwards doesn't bring old entries back */
+    private generation = 0;
 
     constructor(private store?: { load(): Promise<Record<string, string> | undefined>; save(e: Record<string, string>): void; }) {
-        store?.load().then(entries => {
+        if (!store) {
+            this.loadDone = true;
+            return;
+        }
+        const generation = this.generation;
+        store.load().then(entries => {
+            if (generation !== this.generation) return;
             for (const [k, v] of Object.entries(entries ?? {})) if (typeof v === "string" && !this.cache.has(k)) this.cache.set(k, v);
-        }, () => { });
+        }, () => { }).finally(() => {
+            this.loadDone = true;
+            if (this.dirty) this.scheduleSave();
+        });
     }
 
     /** media URL, "" when unknown for good, undefined when not resolved yet */
     peek(pageUrl: string) {
         return this.cache.get(pageUrl);
+    }
+
+    stats() {
+        return { saved: this.cache.size, bytes: this.cache.approxBytes() + this.failedAt.approxBytes() };
+    }
+
+    /** Forgets every resolved page, also the saved ones */
+    clear() {
+        this.generation++;
+        this.loadDone = true;
+        this.cache.clear();
+        this.failedAt.clear();
+        this.dirty = true;
+        this.flush();
     }
 
     /** Whether the last lookup of `pageUrl` failed less than 5 minutes ago */
@@ -209,14 +239,16 @@ class TenorPageResolver {
     }
 
     private scheduleSave() {
-        if (!this.store || this.saveTimer) return;
+        this.dirty = true;
+        if (!this.store || this.saveTimer || !this.loadDone) return;
         this.saveTimer = setTimeout(() => this.flush(), 2000);
     }
 
     flush() {
         if (this.saveTimer) clearTimeout(this.saveTimer);
         this.saveTimer = undefined;
-        if (!this.store) return;
+        if (!this.store || !this.loadDone || !this.dirty) return;
+        this.dirty = false;
         const out: Record<string, string> = {};
         for (const [k, v] of this.cache.entries()) out[k] = v;
         try { this.store.save(out); } catch { }
@@ -371,7 +403,6 @@ type AnyComponent = (props: any) => ReactNode;
 type Memo = { type: AnyComponent; };
 
 interface PickerUtils {
-    useFavoriteGIFsMobile?: () => { favorites?: unknown[]; };
     GIF_PICKER_GUTTER_SPACING?: number;
     GIF_PICKER_ITEM_ESIMTATED_HEIGHT?: number;
 }
@@ -429,31 +460,13 @@ function DeferredPicker({ props }: { props: Record<string, unknown>; }) {
 }
 
 /**
- * Shown on the main page when there's no Favorites category: either there are
- * no favourites yet, or this picker hides them (then starring is no help).
+ * Shown on the main page when there's no Favorites category: there are no
+ * favourites yet, or this picker hides them. The text fits both.
  */
 function MainPageHint() {
-    const useFavorites = pickerUtils?.useFavoriteGIFsMobile;
-    return typeof useFavorites === "function"
-        ? <MainPageHintWithFavorites useFavorites={useFavorites} />
-        : <HintText text="Search for GIFs above." />;
-}
-
-function MainPageHintWithFavorites({ useFavorites }: { useFavorites: NonNullable<PickerUtils["useFavoriteGIFsMobile"]>; }) {
-    const count = useFavorites()?.favorites?.length ?? 0;
-    return (
-        <HintText
-            text={count > 0
-                ? "Search for GIFs above."
-                : "Search for GIFs above. Tap the star on a GIF to add it to your favourites."}
-        />
-    );
-}
-
-function HintText({ text }: { text: string; }) {
     return (
         <View style={styles.favoritesEmpty}>
-            <Design.Text variant="text-md/medium" color="text-muted">{text}</Design.Text>
+            <Design.Text variant="text-md/medium" color="text-muted">Search for GIFs above.</Design.Text>
         </View>
     );
 }
@@ -759,9 +772,11 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
         if (chosen && chosen !== original) {
             // Still / preview not available: try the next best one, then the original
             failed.add(chosen);
+            loaded.delete(chosen);
             setProgress(null);
             const next = pickSrc(item, still);
             setChosen(next !== chosen ? next : original);
+            if (phase === "done") setPhase("loading");
             return;
         }
         if (ticketRef.current) queue.finish(ticketRef.current);
@@ -807,7 +822,8 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
                 },
                 onError: (...a: any[]) => {
                     imgProps.onError?.(...a);
-                    if (phase === "loading") error();
+                    // Also when shown from cache ("done"): the URL may not load any more
+                    if (phase === "loading" || phase === "done") error();
                 },
                 onProgress: (e: any) => {
                     imgProps.onProgress?.(e);
@@ -833,6 +849,36 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
     return hit ? result : tree;
 }
 
+/** Rough memory of the failed preview list */
+function failedBytes() {
+    let n = 0;
+    for (const url of failed.values()) n += url.length + 100;
+    return n;
+}
+
+function cacheStats(): CacheStat[] {
+    const k = klipy?.stats() ?? { saved: 0, recent: 0, bytes: 0 };
+    const t = tenorPages?.stats() ?? { saved: 0, bytes: 0 };
+    const memory = loaded.approxBytes() + apiPreviews.approxBytes() + failedBytes() + k.bytes + t.bytes;
+    return [
+        { label: "Loaded GIFs remembered", value: `${loaded.size} of ${loaded.max}` },
+        { label: "Klipy favourite lookups (saved)", value: `${k.saved}, plus ${k.recent} recent search results` },
+        { label: "Tenor favourites resolved (saved)", value: String(t.saved) },
+        { label: "Search result previews", value: String(apiPreviews.size) },
+        { label: "Previews that failed", value: String(failed.size) },
+        { label: "Memory used", value: `About ${formatBytes(memory)}` },
+    ];
+}
+
+/** Clears every cache, also the saved Klipy and Tenor lookups. Tiles look things up again. */
+function resetCaches() {
+    loaded.clear();
+    failed.clear();
+    apiPreviews.clear();
+    klipy?.clear();
+    tenorPages?.clear();
+}
+
 export default plugin<{ jsonStorage: Settings; }>({
     jsonStorage: {
         load: true,
@@ -843,6 +889,8 @@ export default plugin<{ jsonStorage: Settings; }>({
         setStorage(jsonStorage);
         logger = pluginLogger;
         loaded.resize(getSettings().cacheSize);
+        cacheControl.stats = cacheStats;
+        cacheControl.reset = resetCaches;
 
         const klipyStore = getJsonStorage<{ entries: Record<string, string>; }>(
             pluginStoragePathFor(PLUGIN_ID, "klipy-previews.json"),
@@ -880,6 +928,8 @@ export default plugin<{ jsonStorage: Settings; }>({
                 tenorPages = undefined;
                 klipy = undefined;
                 setStorage(undefined);
+                cacheControl.stats = undefined;
+                cacheControl.reset = undefined;
                 http = undefined;
                 loaded.clear();
                 apiPreviews.clear();
