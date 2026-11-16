@@ -1,0 +1,139 @@
+# BetterGIFS — handoff notes
+
+GifPickerOptimizer: a Discord GIF picker plugin with two builds.
+
+- `vencord/gifPickerOptimizer/`: Vencord user plugin for desktop and web. **This is the one being installed and tested now.**
+- `raincord/gifpickeroptimizer/`: plugin for rain (Raincord), a React Native mobile client mod at github.com/ra1ncord/rain (main repo on codeberg.org/raincord/rain). Not tested on a device yet.
+
+`lowres.ts` and `queue.ts` are identical in both folders. Change both together.
+
+## What the user asked for
+
+1. Load GIFs one at a time, left to right and top to bottom. Each one finishes before the next starts.
+2. Show a loading or progress indicator on tiles that haven't loaded.
+3. Show low-resolution previews in the picker: XS/S/SD on Klipy and Tenor, and smaller versions of vx/fx/twitter and Discord links. The full-resolution GIF must still be what gets sent to chat.
+
+## The user's setup
+
+- Windows. Give commands for cmd or PowerShell, not `mkdir -p` or `cp`.
+- Vencord is built from source. The plugin is copied into `Vencord\src\userplugins\gifPickerOptimizer`, then `pnpm build` and `pnpm inject` are run.
+- Copy only `vencord\gifPickerOptimizer`, never the whole repo. Vencord treats every folder in `userplugins` as a plugin.
+- To re-copy after changes: `xcopy /E /I /Y ..\bettergifs\vencord\gifPickerOptimizer src\userplugins\gifPickerOptimizer`, then rebuild and restart Discord. For quicker iteration, `pnpm dev` (watch mode) followed by Ctrl+R in Discord also works.
+
+## How the Vencord plugin works (`vencord/gifPickerOptimizer/index.tsx`)
+
+### Rule: never touch the data, only what's displayed
+
+Discord's "add favourite" action stores the item's `src`. Sending uses `item.url`. So the plugin never changes item objects or store data; it only changes which URL a tile *shows*. (Other plugins, such as BetterGifLoad, rewrite store data, which means favourites get saved at low resolution.)
+
+### The webpack patch
+
+- Find string: `"renderEmptyFavorite"`. That module holds the GIF picker results list (class `W`) and the tile component (class `H`, exported as `uG`). Inside `renderItem`, Discord does `(0,r.jsx)(H,{item:u,index:t,format:u.format,src:u.src,coords:s,onClick:…,renderExtras:…,imagePool,videoPool,…})`.
+- The patch replaces `H` with `$self.SequentialResult` and passes `Result:H`.
+- Match: `/(\(0,\i\.jsx\)\()(\i),\{(?=item:(\i),index:\i,format:\3\.format,src:\3\.src)/`. This was checked against the datamined code.
+- Reference copy of Discord's code: github.com/Wumpus-Central/discrapper-canary, `chunks/884037.js` (the picker) and `chunks/821102.js` (GIFPickerViewStore). Chunk IDs change between Discord builds, so search by string instead of chunk ID.
+- How tile `H` loads:
+  - Images: preloaded on a detached pooled `<img>`, then an `<img>` is rendered once `onload` fires.
+  - Videos: in `componentDidMount`, a pooled `<video>` (`preload=auto`, autoplay) is added to the tile.
+  - In both cases `H` reads `src` from props.
+
+### `SequentialResult` phases
+
+1. **queued**: renders its own placeholder `div` (`.vc-gpo-tile`, `style={coords}`) instead of `H`, so nothing downloads yet. Clicking the placeholder calls `onClick(item)`, so it still sends.
+2. **loading**: when the queue says go, it picks the preview URL with `pickSrc` and renders `H` with `src=preview` and `key=preview`. `renderExtras` is wrapped to add `LoadOverlay` inside H's root element.
+   - `LoadOverlay` attaches capture-phase listeners (`progress`, `canplaythrough`, `error`) to the parent element for videos. Progress is `buffered / duration`.
+   - For images it loads the same URL in a probe `Image()`. The browser shares the request, so it doesn't download twice.
+3. **done**: `H` is rendered as normal.
+
+**Errors and timeouts:**
+- If the preview fails, the tile switches to the original `src`.
+- After `loadTimeout` seconds, the queue slot is freed while the GIF keeps loading.
+- If the component throws, the ErrorBoundary fallback renders the original tile.
+
+### Queue (`queue.ts`)
+
+- Ordering:
+  - Tiles on screen come first (an IntersectionObserver feeds this).
+  - Then item **index**: the masonry layout places items in index order, so index is the true reading order. Pixel tops in a masonry grid are staggered and give the wrong order.
+- `block()` holds the queue while the Klipy low-res lookup is in flight (3-second cap), so full-size files don't start downloading in the meantime.
+
+### Low-res sources
+
+**Klipy** (`lookupLowRes`):
+- Klipy gives every size a random file name, so the URL can't be rewritten.
+- On `GIF_PICKER_QUERY_SUCCESS` (a flux handler), the plugin calls `RestAPI.get` on `/gifs/search` (or `/gifs/trending-gifs` when there's no query).
+- The request uses the same q, locale and limit, with `media_format` set to `tinywebm` (S) or `nanowebm` (XS). Linux desktop uses `tinywebp` by default, so XS there becomes `nanowebp`.
+- Results are mapped back to tiles by `id` or `url`.
+- SD for Klipy keeps Discord's default size.
+
+**Everything else** is rewritten in `lowres.ts` `rewriteUrl`:
+
+| Source | Rewrite |
+|---|---|
+| Tenor | Last two characters of the media id: image `A2`/`A1`/`A5`, video `P2`/`P3` |
+| Giphy | `100w` / `200w` / `480w` |
+| cdn/media.discordapp.net and images-ext (vx/fx/twitter embeds) | Discord media proxy with `width`, `height`, `format=webp`, `animated=true` |
+| pbs.twimg.com | `name=` parameter |
+
+A preview is only used if it's the same media type as the original (video stays video, image stays image), because H renders based on `format`.
+
+## Verified vs unverified
+
+**Verified in the cloud session:**
+- Both builds typecheck. The full Vencord build passed; the rain build and eslint passed.
+- jsdom test with a replica of Discord's `H` tile:
+  - strictly one download at a time, in index order;
+  - previews shown, and the original item sent, including when clicking a queued tile;
+  - Klipy tiles waited for the lookup;
+  - a 404 preview fell back to the original.
+- A react-test-renderer test of the mobile build passed the equivalent checks.
+
+**Not yet verified in real Discord. Check these first:**
+1. **Does the patch apply?** If not, the console shows a Vencord warning about the `renderEmptyFavorite` patch. Use Vencord's patch helper or the devtools search to find the current `renderItem` code and update the regex.
+2. **Does Discord's API accept `media_format=tinywebm` / `nanowebm`?**
+   - Check the DevTools Network tab for the second `/gifs/search` request.
+   - If it fails, the console shows a warning starting with `[GifPickerOptimizer] Couldn't fetch low resolution Klipy previews`.
+   - Discord's own code lists these names (they date from the Tenor era), but whether the server still accepts them is unconfirmed.
+   - Fallback idea: try other format names, or use `preview`/`gif_src` from the response.
+3. **Tenor size codes.** They come from the Endcord/BetterGifLoad plugin's reverse-engineering. A wrong code 404s and then falls back to the original.
+4. **The tile's root must be positioned.** `.vc-gpo-overlay` uses `position:absolute; inset:0` inside H's root. If the indicator shows up in the wrong place, check whether `coords` includes `position:absolute`.
+5. **Progress:**
+   - Video tiles should show a %.
+   - Image tiles (webp, or Linux desktop) only get a spinner, because images can't report progress.
+   - Discord's CSP probably blocks the `fetch()` streaming approach that would give image progress, so it wasn't attempted.
+6. **Favourites:** sending a favourite must post the original URL, and adding a favourite must store the full-resolution `src`.
+
+## Known limitations
+
+- **Klipy favourites:** no low-res preview, because favourites have no `id` for the API lookup. They still load one at a time.
+- **Videos without a smaller version:** Twitter `video.twimg.com` GIFs and mp4 attachments have no smaller rendition, and the media proxy can't shrink a video and keep it animated. They only get sequential loading.
+- **Desktop progress:** the percentage only appears for video tiles.
+
+## Mobile (rain) notes
+
+- It patches `default` on `modules/gif_picker/native/GIFPickerItemView.tsx` (found with `findByFilePathLazy`) using `instead`.
+- It always calls the original render, which uses hooks, with the original item. Then it swaps the `Image` element in the returned tree:
+  - for a queued placeholder, or
+  - for a clone with the preview `source` plus `onLoad`, `onError` and `onProgress`.
+- Discord mobile already uses `tinywebp`, so the default quality is XS, which requests `nanowebp`.
+- Flux hook: rain's `intercept` from `@api/flux`. HTTP goes through `findByProps("HTTP","get",…).HTTP.get`. See `src/plugins/bringbacktenor` in rain for the same pattern.
+- Mobile reference source: github.com/Wumpus-Central/discord-mobile-datamining, `discord_app/modules/gif_picker/`.
+- rain builds plugins into its bundle. Copy the folder to `rain/src/plugins/`, then `bun install` and `bun run build` (or `bun run serve`).
+
+## Settings (Vencord)
+
+| Setting | Default |
+|---|---|
+| quality (`xs`/`s`/`sd`/`original`) | `s` |
+| sequential | on |
+| concurrency | 1 |
+| prioritizeVisible | on |
+| loadTimeout | 10 s |
+| showProgress | on |
+| klipyLookup | on |
+
+## Suggested next steps
+
+1. Install on Vencord and go through the verification list above.
+2. If the Klipy lookup works, compare file sizes: the Network tab's transferred size for the full vs tiny vs nano versions.
+3. Consider publishing the Vencord plugin as a standalone user plugin repo layout, with a README for other users.
