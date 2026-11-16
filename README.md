@@ -11,10 +11,13 @@ A plugin for **Vencord** (desktop/web) and **Valenced** (mobile) that changes Di
 | Source | How the preview is made |
 |---|---|
 | Klipy (Discord's default) | One extra call to Discord's own `/gifs/search` or `/gifs/trending-gifs` per results page, using a smaller `media_format` (`tinywebm`/`nanowebm`, or `nanowebp` on mobile). Klipy gives every size a random file name, so the small URL can't be worked out from the full one. |
-| Tenor | URL rewrite to `nano`/`tiny` mp4 or webp |
+| Klipy favourites | Discord stores these as the full-size `.gif`. The plugin searches Discord's `/gifs/search` once for the slug in the favourite's `klipy.com/gifs/<slug>` link, asking for a small webp, and keeps the match whose page URL is the same. Results are saved, so each favourite is only looked up once. |
+| Tenor | URL rewrite to Tenor's nano/tiny mp4 or animated webp |
 | Giphy | URL rewrite to `100w`/`200w`/`480w` |
 | Discord attachments, `media.discordapp.net`, `images-ext-*` (vx/fx/twitter and other embeds) | Discord media proxy with `width`, `height`, `format=webp` and `animated=true` |
 | `pbs.twimg.com` | `name=240x240` / `360x360` / `small` |
+
+Favourites saved from chat embeds are stored behind Discord's `images-ext` media proxy. For Tenor, Giphy, Klipy and Twitter links the plugin unwraps the proxy and uses the source's own small renditions.
 
 If a preview fails to load, the tile falls back to the original URL.
 
@@ -87,7 +90,7 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
    bun run build gif-picker-optimizer
    ```
 
-   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.1.0.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
+   To build the installable ZIP (`build\dist\thatkerimguy.gif-picker-optimizer@1.2.0.zip`), run `gradlew packageGifPickerOptimizer`. That needs the JDK and Android SDK listed in the template's README.
 
 4. Load it in Valenced, either with `bun run serve` during development or by publishing the template repository as a plugin repository and adding its URL in Valenced.
 

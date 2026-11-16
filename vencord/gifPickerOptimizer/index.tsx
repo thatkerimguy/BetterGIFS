@@ -13,6 +13,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import * as DataStore from "@api/DataStore";
 import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { classNameFactory } from "@utils/css";
@@ -22,7 +23,8 @@ import { GIFPickerViewStore, LocaleStore, RestAPI, useCallback, useEffect, useRe
 import type { ComponentType, MouseEvent, ReactNode } from "react";
 
 import { LoadedCache, LruCache } from "./cache";
-import { BoundedSet, isKlipyUrl, isVideoUrl, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl, stillUrl } from "./lowres";
+import { KlipyResolver } from "./klipy";
+import { BoundedSet, isKlipyUrl, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, Ticket } from "./queue";
 import managedStyle from "./styles.css?managed";
 
@@ -111,6 +113,18 @@ const loaded = new LoadedCache(1000);
 const failed = new BoundedSet<string>(600);
 /** `${quality}:${id|url}` -> low resolution URL from Discord's GIF API */
 const apiPreviews = new Map<string, string>();
+/** Looks up small versions of Klipy favourites */
+const KLIPY_STORE_KEY = "GifPickerOptimizer_klipyPreviews";
+let klipy: KlipyResolver | undefined;
+
+/** Tickets that were cancelled; a lookup that finishes later must not start them */
+const dropped = new WeakSet<Ticket>();
+function drop(t: Ticket | null) {
+    if (!t) return;
+    dropped.add(t);
+    queue.cancel(t);
+}
+
 /** First frames captured for still favourites, by URL */
 const frames = new LruCache<string, ImageBitmap | HTMLCanvasElement>(300, (_, frame) => {
     if ("close" in frame) frame.close();
@@ -171,14 +185,33 @@ async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
     }
 }
 
+/** media_formats to look a Klipy favourite up with, or null when it doesn't need a lookup */
+function klipyFormats(item: GifItem, src: string): string[] | null {
+    const q = quality();
+    if (!klipy || !settings.store.klipyLookup || q === "original") return null;
+    if (apiPreviews.has(`${q}:${item.id}`) || apiPreviews.has(`${q}:${item.url}`)) return null;
+    if (!isKlipyUrl(src) || !klipy.canResolve(item.url)) return null;
+    const formats = klipyFavoriteFormats(isVideoUrl(src), GIFPickerViewStore.getSelectedFormat(), q);
+    return formats.length ? formats : null;
+}
+
+/** A pending lookup for `item`, or null when its preview URL is already known */
+function klipyLookupFor(item: GifItem, src: string): Promise<unknown> | null {
+    const formats = klipyFormats(item, src);
+    if (!formats || klipy!.peek(item.url, formats) !== undefined) return null;
+    return klipy!.resolve(item.url!, formats);
+}
+
 /** The URL a tile should display. Never changes what gets sent. */
 function pickSrc(item: GifItem, src: string): string {
     const original = normalizeUrl(src);
     const q = quality();
     if (q === "original") return original;
 
+    const formats = klipyFormats(item, src);
     const low = apiPreviews.get(`${q}:${item.id}`)
         ?? apiPreviews.get(`${q}:${item.url}`)
+        ?? (formats && klipy!.peek(item.url, formats))
         ?? rewriteUrl(original, q, item);
 
     if (!low || low === original || failed.has(low)) return original;
@@ -571,7 +604,8 @@ function StillTile({ viewRef, source, video, loading, showProgress, coords, onCl
     );
 }
 
-type Phase = "queued" | "loading" | "done";
+/** resolving: looking up the small Klipy URL before loading */
+type Phase = "queued" | "resolving" | "loading" | "done";
 
 interface ResultProps {
     Result: ComponentType<any>;
@@ -642,30 +676,41 @@ function SequentialResultInner(props: ResultProps) {
         queue.concurrency = sequential ? concurrency : 64;
         queue.prioritizeVisible = prioritizeVisible;
 
+        let started = false;
+        const begin = () => {
+            const p = pick();
+            setChosen(p);
+            if (loaded.hit(p)) {
+                queue.finish(ticket);
+                setPhase("done");
+            } else {
+                setPhase("loading");
+            }
+        };
         const ticket: Ticket = {
             visible: visibleRef.current,
             order: () => indexRef.current ?? 0,
             start: () => {
-                const p = pick();
-                setChosen(p);
-                if (loaded.hit(p)) {
-                    queue.finish(ticket);
-                    setPhase("done");
-                } else {
-                    setPhase("loading");
-                }
+                started = true;
+                const lookup = klipyLookupFor(item, src);
+                if (!lookup) return begin();
+                setPhase("resolving");
+                lookup.then(() => !dropped.has(ticket) && begin());
             },
         };
         ticketRef.current = ticket;
         queue.enqueue(ticket);
 
-        return () => queue.cancel(ticket);
+        // Once started, the slot is freed by finishing, parking or unmounting instead
+        return () => {
+            if (!started) drop(ticket);
+        };
     }, [phase, parked, still]);
 
     // Scrolled far away while loading: stop, free the slot, and queue again when it comes back
     useEffect(() => {
-        if (!parked || phase !== "loading") return;
-        if (ticketRef.current) queue.cancel(ticketRef.current);
+        if (!parked || (phase !== "loading" && phase !== "resolving")) return;
+        drop(ticketRef.current);
         setPhase("queued");
     }, [parked, phase]);
 
@@ -674,22 +719,20 @@ function SequentialResultInner(props: ResultProps) {
     useEffect(() => {
         if (stillRef.current === still) return;
         stillRef.current = still;
-        if (ticketRef.current) queue.cancel(ticketRef.current);
+        drop(ticketRef.current);
         setChosen(null);
         setPhase("queued");
     }, [still]);
 
     // Release the slot after the timeout so one slow GIF doesn't hold everything up
     useEffect(() => {
-        if (phase !== "loading") return;
+        if (phase !== "loading" && phase !== "resolving") return;
         const t = setTimeout(() => ticketRef.current && queue.finish(ticketRef.current), loadTimeout * 1000);
         return () => clearTimeout(t);
     }, [phase, chosen]);
 
     // Unmounted while loading: free the slot
-    useEffect(() => () => {
-        if (ticketRef.current) queue.cancel(ticketRef.current);
-    }, []);
+    useEffect(() => () => drop(ticketRef.current), []);
 
     const original = normalizeUrl(src);
 
@@ -715,8 +758,8 @@ function SequentialResultInner(props: ResultProps) {
     const click = (e: MouseEvent) => rest.onClick?.(item, rest.index, { shiftKey: e.shiftKey });
     const contextMenu = (e: MouseEvent) => rest.onContextMenu?.(e, item);
 
-    // Waiting for its turn, or unloaded because it's far off screen
-    if (phase === "queued" || parked) {
+    // Waiting for its turn, being looked up, or unloaded because it's far off screen
+    if (phase === "queued" || phase === "resolving" || parked) {
         return (
             <div
                 ref={viewRef}
@@ -725,7 +768,7 @@ function SequentialResultInner(props: ResultProps) {
                 onClick={click}
                 onContextMenu={contextMenu}
             >
-                {showProgress && !parked && <Indicator state="queued" />}
+                {showProgress && !parked && <Indicator state={phase === "resolving" ? "loading" : "queued"} />}
                 {rest.renderExtras?.(item)}
             </div>
         );
@@ -815,9 +858,24 @@ export default definePlugin({
 
     start() {
         loaded.resize(settings.store.cacheSize);
+        klipy = new KlipyResolver({
+            async search(q, format, limit) {
+                const res = await RestAPI.get({
+                    url: "/gifs/search",
+                    query: { q, media_format: format, locale: LocaleStore.locale, limit },
+                    oldFormErrors: true,
+                });
+                return Array.isArray(res?.body) ? res.body : [];
+            },
+            load: () => DataStore.get<Record<string, string>>(KLIPY_STORE_KEY),
+            save: entries => void DataStore.set(KLIPY_STORE_KEY, entries),
+            onError: e => logger.warn("Klipy favourite lookup failed", e),
+        });
     },
 
     stop() {
+        klipy?.flush();
+        klipy = undefined;
         visibleWatcher.disconnect();
         nearWatcher.disconnect();
         loaded.clear();

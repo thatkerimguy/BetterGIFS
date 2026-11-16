@@ -12,6 +12,7 @@
  */
 
 import { onFluxEventDispatched, Stores } from "@valenced/discord/flux";
+import { getJsonStorage, pluginStoragePathFor } from "@valenced/json-storage";
 import { getModuleWithImportedPath } from "@valenced/discord/utils/modules/finders";
 import { getModules } from "@valenced/modules/finders";
 import { withProps } from "@valenced/modules/finders/filters";
@@ -23,11 +24,13 @@ import type { DiscordModules } from "@valenced/discord/types";
 import type { ReactNode } from "react";
 
 import { LoadedCache } from "./cache";
-import { BoundedSet, isKlipyUrl, isVideoUrl, lowResMediaFormat, normalizeUrl, rewriteUrl, stillUrl } from "./lowres";
+import { KlipyResolver } from "./klipy";
+import { BoundedSet, isKlipyUrl, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, rewriteUrl, stillUrl } from "./lowres";
 import { LoadQueue, type Ticket } from "./queue";
 import SettingsComponent from "./settings";
 import { DefaultSettings, getSettings, setStorage, type Settings, useSettings } from "./shared";
 
+const PLUGIN_ID = "thatkerimguy.gif-picker-optimizer";
 const ITEM_VIEW_PATH = "modules/gif_picker/native/GIFPickerItemView.tsx";
 const RESULTS_LIST_PATH = "modules/gif_picker/native/GIFPickerResultsList.tsx";
 
@@ -40,6 +43,16 @@ const loaded = new LoadedCache(DefaultSettings.cacheSize);
 const failed = new BoundedSet<string>(600);
 /** `${quality}:${id|url}` -> low resolution URL from Discord's GIF API */
 const apiPreviews = new Map<string, string>();
+/** Looks up small versions of Klipy favourites (created on start) */
+let klipy: KlipyResolver | undefined;
+
+/** Tickets that were cancelled; a lookup that finishes later must not start them */
+const dropped = new WeakSet<Ticket>();
+function drop(t: Ticket | null) {
+    if (!t) return;
+    dropped.add(t);
+    queue.cancel(t);
+}
 
 interface GifItem {
     id?: string;
@@ -80,8 +93,7 @@ async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
     const items = event.items ?? [];
     if (!items.some(i => i?.src && isKlipyUrl(i.src) && !apiPreviews.has(`${q}:${i.id ?? i.url}`))) return;
 
-    const PickerStore = Stores.GIFPickerViewStore as unknown as { getSelectedFormat?(): string; } | undefined;
-    const format = lowResMediaFormat(PickerStore?.getSelectedFormat?.() ?? "tinywebp", q);
+    const format = lowResMediaFormat(selectedFormat(), q);
     if (!format) return;
 
     // Hold the queue so tiles don't start loading the full resolution file meanwhile
@@ -114,6 +126,27 @@ async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
     }
 }
 
+function selectedFormat() {
+    return (Stores.GIFPickerViewStore as unknown as { getSelectedFormat?(): string; } | undefined)?.getSelectedFormat?.() ?? "tinywebp";
+}
+
+/** media_formats to look a Klipy favourite up with, or null when it doesn't need a lookup */
+function klipyFormats(item: GifItem): string[] | null {
+    const { quality: q, klipyLookup } = getSettings();
+    if (!klipy || !klipyLookup || q === "original") return null;
+    if (apiPreviews.has(`${q}:${item.id}`) || apiPreviews.has(`${q}:${item.url}`)) return null;
+    if (!isKlipyUrl(item.src) || !klipy.canResolve(item.url)) return null;
+    const formats = klipyFavoriteFormats(isVideoUrl(item.src), selectedFormat(), q);
+    return formats.length ? formats : null;
+}
+
+/** A pending lookup for `item`, or null when its preview URL is already known */
+function klipyLookupFor(item: GifItem): Promise<unknown> | null {
+    const formats = klipyFormats(item);
+    if (!formats || klipy!.peek(item.url, formats) !== undefined) return null;
+    return klipy!.resolve(item.url!, formats);
+}
+
 /**
  * The URL a tile should display. Never changes what gets sent.
  * With `still`, a non-animated image is preferred when the source has one.
@@ -128,8 +161,10 @@ function pickSrc(item: GifItem, still = false): string {
         }
         if (q === "original") return original;
 
+        const formats = klipyFormats(item);
         const low = apiPreviews.get(`${q}:${item.id}`)
             ?? apiPreviews.get(`${q}:${item.url}`)
+            ?? (formats && klipy!.peek(item.url, formats))
             ?? rewriteUrl(original, q, item);
 
         if (!low || low === original || failed.has(low)) return original;
@@ -321,7 +356,8 @@ function replaceInTree(node: any, pred: (n: any) => boolean, replace: (n: any) =
     return [node, false];
 }
 
-type Phase = "queued" | "loading" | "done";
+/** resolving: looking up the small Klipy URL before loading */
+type Phase = "queued" | "resolving" | "loading" | "done";
 
 interface ItemProps {
     item: GifItem;
@@ -400,24 +436,35 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
         queue.concurrency = sequential ? concurrency : 64;
         queue.prioritizeVisible = true;
 
+        let started = false;
+        const begin = () => {
+            const p = pickSrc(item, still);
+            setChosen(p);
+            setProgress(null);
+            if (loaded.hit(p)) {
+                queue.finish(ticket);
+                setPhase("done");
+            } else {
+                setPhase("loading");
+            }
+        };
         const ticket: Ticket = {
             visible: visibleRef.current,
             order: () => indexRef.current ?? 0,
             start: () => {
-                const p = pickSrc(item, still);
-                setChosen(p);
-                setProgress(null);
-                if (loaded.hit(p)) {
-                    queue.finish(ticket);
-                    setPhase("done");
-                } else {
-                    setPhase("loading");
-                }
+                started = true;
+                const lookup = klipyLookupFor(item);
+                if (!lookup) return begin();
+                setPhase("resolving");
+                lookup.then(() => !dropped.has(ticket) && begin());
             },
         };
         ticketRef.current = ticket;
         queue.enqueue(ticket);
-        return () => queue.cancel(ticket);
+        // Once started, the slot is freed by finishing, parking or unmounting instead
+        return () => {
+            if (!started) drop(ticket);
+        };
     }, [phase, parked, still]);
 
     // The still previews setting changed: pick the URL again
@@ -425,7 +472,7 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
     useEffect(() => {
         if (stillRef.current === still) return;
         stillRef.current = still;
-        if (ticketRef.current) queue.cancel(ticketRef.current);
+        drop(ticketRef.current);
         setChosen(null);
         setProgress(null);
         setPhase("queued");
@@ -433,23 +480,21 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
 
     // Scrolled far away while loading: stop, free the slot, and queue again when it comes back
     useEffect(() => {
-        if (!parked || phase !== "loading") return;
-        if (ticketRef.current) queue.cancel(ticketRef.current);
+        if (!parked || (phase !== "loading" && phase !== "resolving")) return;
+        drop(ticketRef.current);
         setProgress(null);
         setPhase("queued");
     }, [parked, phase]);
 
     // Release the slot after the timeout so one slow GIF doesn't hold everything up
     useEffect(() => {
-        if (phase !== "loading") return;
+        if (phase !== "loading" && phase !== "resolving") return;
         const t = setTimeout(() => ticketRef.current && queue.finish(ticketRef.current), loadTimeout * 1000);
         return () => clearTimeout(t);
     }, [phase, chosen]);
 
     // Unmounted while loading: free the slot
-    useEffect(() => () => {
-        if (ticketRef.current) queue.cancel(ticketRef.current);
-    }, []);
+    useEffect(() => () => drop(ticketRef.current), []);
 
     const original = normalizeUrl(item.src);
 
@@ -477,11 +522,11 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
     const [result, hit] = replaceInTree(tree, isImage, (img: any) => {
         const imgProps = img.props;
 
-        // Off screen (unloaded) or waiting for its turn: an empty frame, no image in memory
-        if (parked || phase === "queued") {
+        // Off screen (unloaded), waiting for its turn or being looked up: an empty frame, no image in memory
+        if (parked || phase === "queued" || phase === "resolving") {
             return (
                 <View style={[imgProps.style, styles.frame]}>
-                    {showProgress && !parked && <Indicator state="queued" progress={null} />}
+                    {showProgress && !parked && <Indicator state={phase === "resolving" ? "loading" : "queued"} progress={null} />}
                 </View>
             );
         }
@@ -521,7 +566,7 @@ function OptimizedItem({ props, render }: { props: ItemProps; render: (p: ItemPr
 
     // Unknown tree shape: leave Discord's tile alone and don't hold up the queue
     useEffect(() => {
-        if (!hit && ticketRef.current) queue.cancel(ticketRef.current);
+        if (!hit) drop(ticketRef.current);
     }, [hit]);
 
     return hit ? result : tree;
@@ -538,8 +583,30 @@ export default plugin<{ jsonStorage: Settings; }>({
         logger = pluginLogger;
         loaded.resize(getSettings().cacheSize);
 
+        const klipyStore = getJsonStorage<{ entries: Record<string, string>; }>(
+            pluginStoragePathFor(PLUGIN_ID, "klipy-previews.json"),
+            { default: { entries: {} } },
+        );
+        klipy = new KlipyResolver({
+            async search(q, format, limit) {
+                if (!http) throw new Error("HTTP module not found yet");
+                const locale = (Stores.LocaleStore as unknown as { locale?: string; } | undefined)?.locale;
+                const res = await http.get({
+                    url: "/gifs/search",
+                    query: { q, media_format: format, ...(locale ? { locale } : {}), limit },
+                    oldFormErrors: true,
+                });
+                return Array.isArray(res?.body) ? res.body : [];
+            },
+            load: async () => (await klipyStore.get())?.entries,
+            save: entries => void klipyStore.set({ entries }, true),
+            onError: e => logger?.warn?.("Klipy favourite lookup failed", e),
+        });
+
         cleanup(
             () => {
+                klipy?.flush();
+                klipy = undefined;
                 setStorage(undefined);
                 http = undefined;
                 loaded.clear();

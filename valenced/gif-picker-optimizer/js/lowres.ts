@@ -20,12 +20,14 @@ export const QUALITY_CAP: Record<Exclude<Quality, "original">, number> = {
 };
 
 // Tenor encodes the rendition in the last two characters of the media id.
-//   image: A2 = nanowebp, A1 = tinywebp, A5 = ~360px webp
-//   video: P2 = nanomp4,  P3 = tinymp4
+//   image: A2 = nanowebp (90px), A1 = tinywebp (200px), Ax = webp (498px). All animated.
+//          (A5 is a static frame, not usable for previews.)
+//   video: P2 = nanomp4,  P1 = tinymp4 (P3 is tinywebm, which isn't an mp4)
+// Checked against Tenor's API in 2026-11.
 const TENOR_CODES = {
     xs: { image: "A2", video: "P2" },
-    s: { image: "A1", video: "P3" },
-    sd: { image: "A5", video: "P3" },
+    s: { image: "A1", video: "P1" },
+    sd: { image: "Ax", video: "P1" },
 } as const;
 
 // Giphy rendition names
@@ -47,6 +49,10 @@ const GIPHY_RE = /^https:\/\/(?:media\d?|i)\.giphy\.com\/(?:media\/(?:v\d\.[^/]+
 const IMAGES_EXT_RE = /^images-ext-\d+\.discordapp\.net$/i;
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v)$/i;
 const URL_RE = /^(https?:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i;
+// images-ext-N.discordapp.net/external/<signature>/<scheme>/<host>/<path>
+const EXTERNAL_PATH_RE = /^\/external\/[^/]+\/(https?)\/(.+)$/i;
+/** Hosts whose own small renditions beat resizing through Discord's proxy */
+const UNWRAP_HOSTS_RE = /(^|\.)(tenor\.com|tenor\.co|giphy\.com|klipy\.com|twimg\.com)$/i;
 
 export function normalizeUrl(url: string): string {
     return url.startsWith("//") ? "https:" + url : url;
@@ -102,13 +108,38 @@ function mediaPath(u: ParsedUrl) {
     return path.toLowerCase();
 }
 
+/**
+ * For a URL behind Discord's external media proxy (images-ext), returns the URL it
+ * proxies. Favourites saved from chat embeds (Tenor, Klipy, vx/fx links) are stored
+ * like that. Returns null for anything else.
+ */
+export function unwrapProxyUrl(url: string): string | null {
+    const u = parseUrl(url);
+    if (!u || !IMAGES_EXT_RE.test(u.hostname)) return null;
+    const m = EXTERNAL_PATH_RE.exec(u.pathname);
+    if (!m) return null;
+    let rest = m[2];
+    try { rest = decodeURIComponent(rest); } catch { }
+    return `${m[1].toLowerCase()}://${rest}`;
+}
+
+/** The URL to work out previews from: the proxied URL for known GIF hosts, else `url` itself */
+function sourceUrl(url: string): string {
+    const inner = unwrapProxyUrl(url);
+    if (inner) {
+        const host = parseUrl(inner)?.hostname;
+        if (host && UNWRAP_HOSTS_RE.test(host)) return inner;
+    }
+    return normalizeUrl(url);
+}
+
 export function isVideoUrl(url: string): boolean {
     const u = parseUrl(url);
     return u != null && VIDEO_EXT_RE.test(mediaPath(u));
 }
 
 export function isKlipyUrl(url: string): boolean {
-    const u = parseUrl(url);
+    const u = parseUrl(sourceUrl(url));
     return u != null && /(^|\.)klipy\.com$/i.test(u.hostname);
 }
 
@@ -119,7 +150,7 @@ export function isKlipyUrl(url: string): boolean {
  */
 export function rewriteUrl(src: string, quality: Quality, dims?: { width?: number; height?: number; }): string | null {
     if (quality === "original" || !src) return null;
-    const url = normalizeUrl(src);
+    const url = sourceUrl(src);
 
     // Tenor
     const tenor = url.match(TENOR_RE);
@@ -197,7 +228,7 @@ const TWITTER_VIDEO_RE = /^https:\/\/video\.twimg\.com\/tweet_video\/([A-Za-z0-9
  */
 export function stillUrl(src: string, quality: Quality, dims?: { width?: number; height?: number; }): string | null {
     if (!src) return null;
-    const url = normalizeUrl(src);
+    const url = sourceUrl(src);
 
     const tenor = url.match(TENOR_RE);
     if (tenor) {
@@ -262,6 +293,46 @@ export function lowResMediaFormat(selectedFormat: string, quality: Quality): str
     if (fmt.startsWith("nano")) return null;
     if (fmt.startsWith("tiny") && wanted === "tiny") return null;
     return wanted + family;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         Klipy favourites lookup                            */
+/* -------------------------------------------------------------------------- */
+
+const KLIPY_PAGE_RE = /^https?:\/\/(?:www\.)?klipy\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:gifs?|stickers?|clips?)\/([^/?#]+)/i;
+
+/** Search query for a Klipy page URL (`https://klipy.com/gifs/guh-lexa-fortnite` -> `guh lexa fortnite`) */
+export function klipyPageQuery(pageUrl: string | undefined): string | null {
+    const m = pageUrl && KLIPY_PAGE_RE.exec(normalizeUrl(pageUrl));
+    if (!m) return null;
+    let slug = m[1];
+    try { slug = decodeURIComponent(slug); } catch { }
+    const q = slug.replace(/[-_]+/g, " ").trim();
+    return q || null;
+}
+
+/** Compares page URLs, ignoring scheme, www, letter case, query and trailing slash */
+export function pageKey(url: string | undefined): string {
+    return normalizeUrl(url ?? "")
+        .replace(/^https?:\/\//i, "")
+        .replace(/^www\./i, "")
+        .replace(/[?#].*$/, "")
+        .replace(/\/+$/, "")
+        .toLowerCase();
+}
+
+/**
+ * media_formats to look a Klipy favourite up with, best first. Favourites are
+ * usually stored as the full size .gif, so images get a small webp; videos keep
+ * their family.
+ */
+export function klipyFavoriteFormats(originalIsVideo: boolean, selectedFormat: string, quality: Quality): string[] {
+    if (quality === "original") return [];
+    if (originalIsVideo) {
+        const f = lowResMediaFormat(selectedFormat, quality);
+        return f ? [f] : [];
+    }
+    return quality === "xs" ? ["nanowebp", "tinywebp"] : ["tinywebp"];
 }
 
 /** Simple bounded set (drops oldest entries) */

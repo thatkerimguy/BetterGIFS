@@ -44,6 +44,11 @@ export class LruCache<K, V> {
         return true;
     }
 
+    /** Entries from oldest to newest use. Doesn't count as a use. */
+    entries() {
+        return this.map.entries();
+    }
+
     /** Changes the capacity, evicting the oldest entries if needed */
     resize(max: number) {
         this.max = max;

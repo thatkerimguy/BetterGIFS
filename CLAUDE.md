@@ -86,7 +86,7 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 
 | Source | Rewrite |
 |---|---|
-| Tenor | Last two characters of the media id: image `A2`/`A1`/`A5`, video `P2`/`P3` |
+| Tenor | Last two characters of the media id: image `A2`/`A1`/`Ax` (nano/tiny/full webp, all animated; `A5` is a static frame), video `P2`/`P1`/`P1` (nano/tiny mp4; `P3` is tinywebm). Checked against Tenor's API 2026-11. |
 | Giphy | `100w` / `200w` / `480w` |
 | cdn/media.discordapp.net and images-ext (vx/fx/twitter embeds) | Discord media proxy with `width`, `height`, `format=webp`, `animated=true` |
 | pbs.twimg.com | `name=` parameter |
@@ -94,6 +94,10 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 A preview is only used if it's the same media type as the original (video stays video, image stays image), because H renders based on `format`.
 
 ## Verified vs unverified
+
+**Fixed and verified on 2026-11-16 (1.2.0, low-res for favourites):**
+- The queue effect's cleanup used to cancel a ticket as soon as it started loading (its deps include `phase`), so loading wasn't strictly sequential. Now only unstarted tickets are cancelled there; started ones are freed by finishing, parking (`drop`) or unmounting.
+- Unit tests (Bun) for proxy unwrapping, the Tenor codes and `KlipyResolver` (format fallback, caching of other results, misses, persistence) pass. Tenor URLs generated for the user's reported GIFs were fetched live: all 200; the webps are animated.
 
 **Verified on 2026-11-16 (Valenced port + unloading + still favourites):**
 - Valenced build: `tsc -b` passes (and catches a planted error), `valenced-plugin build` produces `build/js/index.js`. Biome only reports style (tabs vs spaces, import type).
@@ -127,7 +131,8 @@ A preview is only used if it's the same media type as the original (video stays 
 
 ## Known limitations
 
-- **Klipy favourites:** no low-res preview, because favourites have no `id` for the API lookup. They still load one at a time.
+- **Klipy favourites** (fixed in 1.2.0): Discord's add-favourite code (desktop chunk with `"favoriteGifs"` + `GIF_FAVORITED`) stores `gifSrc` (the full .gif) instead of the mp4, and proxies it through images-ext when the src is a Discord media URL. `klipy.ts` `KlipyResolver` searches `/gifs/search` for the slug of the favourite's `url` (`klipy.com/gifs/<slug>`) with `media_format` `nanowebp`/`tinywebp` (images) or the selected video family, matches by page URL, caches every result (also misses) in an LRU of 5000, and persists it (desktop: `DataStore` key `GifPickerOptimizer_klipyPreviews`; mobile: `klipy-previews.json` in the plugin's storage). Lookups run one at a time, 300 ms apart. Tiles show a spinner in the `resolving` phase meanwhile. **Unverified:** whether Discord's API accepts `nanowebp`/`tinywebp` on desktop and whether search finds the exact GIF for every slug. A miss just shows the original.
+- **Proxied favourites** (fixed in 1.2.0): `unwrapProxyUrl` turns `images-ext-N.discordapp.net/external/<sig>/https/<host>/<path>` back into the source URL for Tenor, Giphy, Klipy and twimg hosts.
 - **Videos without a smaller version:** Twitter `video.twimg.com` GIFs and mp4 attachments have no smaller rendition, and the media proxy can't shrink a video and keep it animated. They only get sequential loading.
 - **Desktop progress:** the percentage only appears for video tiles.
 
