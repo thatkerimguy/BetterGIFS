@@ -1,15 +1,15 @@
 {
   "format": 1,
   "name": "KerimsPluginRepo",
-  "description": "Kerim's Valenced plugins. GifPickerOptimizer: sequential loading, low resolution previews, off-screen unloading and still favourites in the GIF picker.",
+  "description": "Kerim's Plugins for Vencord and Valenced",
   "plugins": {
     "thatkerimguy.gif-picker-optimizer": {
-      "name": "GifPickerOptimizer",
-      "description": "Loads GIFs in the picker one by one with a progress indicator, shows low resolution previews while still sending the full resolution GIF, and unloads off-screen GIFs so big favourite libraries stay smooth.",
+      "name": "GIFs+",
+      "description": "Various Tweaks to the Discord's Gif Picker",
       "author": "thatkerimguy (https://github.com/thatkerimguy \"GitHub\")",
       "icon": "GifIcon",
       "channels": {
-        "latest": "1.5.1"
+        "latest": "1.7.0"
       },
       "versions": {
         "1.1.0": {
@@ -133,6 +133,19 @@
           "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.5.1.zip",
           "sha256": "c0a878634021ab641bab00fb628baae7ffd6e25c9c1dcaaacf0484e1febbd36d",
           "size": 12510,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        },
+        "1.7.0": {
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.7.0.zip",
+          "sha256": "da7263bf84bfce16730634e54fb757df7767ab5cf70c4f88cb336803f2423393",
+          "size": 21269,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
