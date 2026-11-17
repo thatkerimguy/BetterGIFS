@@ -1,1099 +1,87 @@
 /*
- * GifPickerOptimizer for Vencord
+ * GIFs+ for Vencord (named GifPickerOptimizer before 1.6.0)
  *
  * - Loads GIF picker results one at a time, in reading order (left to right,
  *   top to bottom), waiting for each one to finish before starting the next.
  * - Shows a loading / progress indicator on tiles that are still empty.
  * - Shows a lower resolution preview in the picker (XS / S / SD) while still
  *   sending and favouriting the original, full resolution GIF.
- * - Unloads GIFs that scrolled far off screen and shows them again from cache
- *   when they come back, so big favourite libraries stay smooth.
+ * - Remembers which GIFs loaded (also across restarts), so they show again
+ *   without waiting in the queue, and big favourite libraries stay smooth.
+ * - Exports / imports favourites.
  * - Optionally shows still (not animated) previews in the favourites tab.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 import * as DataStore from "@api/DataStore";
-import { definePluginSettings } from "@api/Settings";
-import { Button } from "@components/Button";
-import ErrorBoundary from "@components/ErrorBoundary";
-import { Heading } from "@components/Heading";
-import { Paragraph } from "@components/Paragraph";
-import { classNameFactory } from "@utils/css";
-import { Logger } from "@utils/Logger";
-import definePlugin, { makeRange, OptionType } from "@utils/types";
-import { GIFPickerViewStore, LocaleStore, RestAPI, useCallback, useEffect, useRef, useState } from "@webpack/common";
-import type { ComponentType, MouseEvent, ReactNode } from "react";
+import { migratePluginSettings } from "@api/Settings";
+import definePlugin from "@utils/types";
+import { LocaleStore, RestAPI } from "@webpack/common";
 
-import { formatBytes, LoadedCache, LruCache } from "./cache";
-import { KlipyResolver, wait } from "./klipy";
-import { BoundedSet, isKlipyUrl, isVideoUrl, klipyFavoriteFormats, lowResMediaFormat, normalizeUrl, Quality, rewriteUrl, stillUrl } from "./lowres";
-import { LoadQueue, Ticket } from "./queue";
+import { clearPatches, expectPatch } from "./diagnostics";
+import { featured, mountCategories, needsCategories } from "./favoritesOnly";
+import { FavoritesSettings } from "./FavoritesSettings";
+import { GifTile } from "./GifTile";
+import type { GifItem } from "./items";
+import { KlipyResolver } from "./klipyLookups";
+import { patches } from "./patches";
+import { createLowResPages, lowResStarted } from "./previews";
+import type { UrlListStore } from "./saved";
+import { applyQueueSettings, onConnectionChange, settings } from "./settings";
+import { apiPreviews, failed, FAILED_STORE_KEY, flushSaved, KLIPY_STORE_KEY, loadedThisSession, logger, OLD_PLUGIN_NAME, OLD_PRECACHE_STORE_KEY, PLUGIN_NAME, runtime, seen, SEEN_STORE_KEY, settingsPanels } from "./state";
+import { frames } from "./stillFrames";
 import managedStyle from "./styles.css?managed";
-
-const logger = new Logger("GifPickerOptimizer");
-const cl = classNameFactory("vc-gpo-");
-
-/** "800", "1.2K", "3K": four digit marker labels are too wide and wrap under the slider */
-const shortNumber = (v: number) => v >= 1000 ? `${+(v / 1000).toFixed(1)}K` : String(v);
-/** Slider labels: short markers, and whole numbers instead of "3.00" while dragging */
-const sliderLabels = { onMarkerRender: shortNumber, onValueRender: (v: number) => String(Math.round(v)) };
-
-const settings = definePluginSettings({
-    quality: {
-        type: OptionType.SELECT,
-        description: "Resolution of the previews shown in the GIF picker. The GIF you send is always full resolution.",
-        options: [
-            { label: "XS (smallest, fastest)", value: "xs" },
-            { label: "S", value: "s", default: true },
-            { label: "SD", value: "sd" },
-            { label: "Original (don't downscale)", value: "original" },
-        ],
-    },
-    sequential: {
-        type: OptionType.BOOLEAN,
-        description: "Load GIFs one after another (left to right, top to bottom) instead of all at once",
-        default: true,
-    },
-    concurrency: {
-        type: OptionType.SLIDER,
-        description: "How many GIFs may load at the same time when sequential loading is on",
-        markers: makeRange(1, 6, 1),
-        default: 3,
-        stickToMarkers: true,
-        componentProps: sliderLabels,
-    },
-    prioritizeVisible: {
-        type: OptionType.BOOLEAN,
-        description: "Load GIFs that are on screen before ones you scrolled past",
-        default: true,
-    },
-    loadTimeout: {
-        type: OptionType.SLIDER,
-        description: "Seconds to wait for a slow GIF before moving on to the next one (it keeps loading in the background)",
-        markers: [3, 5, 8, 10, 15, 20, 30],
-        default: 10,
-        stickToMarkers: true,
-        componentProps: sliderLabels,
-    },
-    showProgress: {
-        type: OptionType.BOOLEAN,
-        description: "Show a loading / progress indicator on GIFs that haven't loaded yet",
-        default: true,
-    },
-    klipyLookup: {
-        type: OptionType.BOOLEAN,
-        description: "Ask Discord's GIF API for the small Klipy renditions (one extra request per search page). Needed for XS/S on Klipy results.",
-        default: true,
-    },
-    unloadOffscreen: {
-        type: OptionType.BOOLEAN,
-        description: "Unload GIFs you scrolled far away from to free memory. They come back from cache when you scroll back.",
-        default: true,
-    },
-    offscreenMargin: {
-        type: OptionType.SLIDER,
-        description: "How far (px) above and below the visible area GIFs stay loaded",
-        markers: [200, 400, 800, 1200, 2000],
-        default: 800,
-        stickToMarkers: true,
-        componentProps: sliderLabels,
-        onChange: () => nearWatcher.refresh(),
-    },
-    cacheSize: {
-        type: OptionType.SLIDER,
-        description: "How many loaded GIFs to remember, so they show instantly when you scroll back to them",
-        markers: [300, 1000, 3000],
-        default: 1000,
-        stickToMarkers: true,
-        componentProps: sliderLabels,
-        onChange: (size: number) => loaded.resize(size),
-    },
-    stillFavorites: {
-        type: OptionType.BOOLEAN,
-        description: "Show still images instead of playing GIFs in the favourites tab. Sent GIFs still animate.",
-        default: false,
-    },
-    favoritesOnly: {
-        type: OptionType.BOOLEAN,
-        description: "Hide Trending GIFs and the other featured categories. The picker's main page keeps search and the Favorites category.",
-        default: false,
-    },
-    // Last, so the stats and reset button don't sit between the toggles
-    cache: {
-        type: OptionType.COMPONENT,
-        component: () => <CacheSettings />,
-    },
-});
-
-/* -------------------------------------------------------------------------- */
-/*                         Low resolution URL lookup                          */
-/* -------------------------------------------------------------------------- */
-
-const queue = new LoadQueue();
-/** URLs that finished loading. Scrolled-back tiles with a cached URL skip the queue. */
-const loaded = new LoadedCache(1000);
-/** Preview URLs that failed, never tried again */
-const failed = new BoundedSet<string>(600);
-/** `${quality}:${id|url}` -> low resolution URL from Discord's GIF API */
-// Only the current results page needs these: 1200 entries is about 12 pages (id + url keys)
-const apiPreviews = new LruCache<string, string>(1200);
-/** Stable empty list, so memoized category data doesn't change on every render */
-const NO_CATEGORIES: never[] = [];
-/** Discord's "fetch trending categories" action, from the open picker's main page */
-let fetchCategories: (() => void) | undefined;
-let categoriesRequested = false;
-
-function needsCategories(categories: unknown[] | undefined) {
-    return !settings.store.favoritesOnly && (categories?.length ?? 0) === 0;
-}
-/** Looks up small versions of Klipy favourites */
-const KLIPY_STORE_KEY = "GifPickerOptimizer_klipyPreviews";
-let klipy: KlipyResolver | undefined;
-
-/** Tickets that were cancelled; a lookup that finishes later must not start them */
-const dropped = new WeakSet<Ticket>();
-function drop(t: Ticket | null) {
-    if (!t) return;
-    dropped.add(t);
-    queue.cancel(t);
-}
-
-/**
- * First frames captured for still favourites, by URL. Frames are decoded
- * bitmaps (4 bytes per pixel), so they're captured at tile size and limited by
- * bytes: 24 MB is about 150 tiles at 1x, or 40 at 2x.
- */
-const FRAME_BUDGET_BYTES = 24 * 1024 * 1024;
-const frames = new LruCache<string, ImageBitmap | HTMLCanvasElement>(
-    FRAME_BUDGET_BYTES,
-    (_, frame) => {
-        if ("close" in frame) frame.close();
-        else frame.width = frame.height = 0;
-    },
-    frame => frame.width * frame.height * 4,
-);
-
-interface GifItem {
-    id?: string;
-    url?: string;
-    src: string;
-    gif_src?: string;
-    width?: number;
-    height?: number;
-    /** only favourites have this (their position in the favourites list) */
-    order?: number;
-}
-
-function quality() {
-    return settings.store.quality as Quality;
-}
-
-async function lookupLowRes(event: { query?: string; items?: GifItem[]; }) {
-    const q = quality();
-    if (!settings.store.klipyLookup || q === "original") return;
-
-    const items = event.items ?? [];
-    const missing = items.some(i => i?.src && isKlipyUrl(i.src) && !apiPreviews.has(`${q}:${i.id ?? i.url}`));
-    if (!missing) return;
-
-    const format = lowResMediaFormat(GIFPickerViewStore.getSelectedFormat(), q);
-    if (!format) return;
-
-    // Hold the queue so tiles don't start loading the full resolution file meanwhile
-    const release = queue.block(3000);
-    try {
-        const isSearch = typeof event.query === "string";
-        const res = await RestAPI.get({
-            url: isSearch ? "/gifs/search" : "/gifs/trending-gifs",
-            query: {
-                ...(isSearch ? { q: event.query } : {}),
-                media_format: format,
-                locale: LocaleStore.locale,
-                limit: items.length,
-            },
-            oldFormErrors: true,
-        });
-
-        for (const r of (res?.body ?? []) as GifItem[]) {
-            if (!r?.src) continue;
-            const low = normalizeUrl(r.src);
-            if (r.id != null) apiPreviews.set(`${q}:${r.id}`, low);
-            if (r.url != null) apiPreviews.set(`${q}:${r.url}`, low);
-        }
-    } catch (e) {
-        logger.warn(`Couldn't fetch low resolution Klipy previews (media_format=${format})`, e);
-    } finally {
-        release();
-    }
-}
-
-/** media_formats to look a Klipy favourite up with, or null when it doesn't need a lookup */
-function klipyFormats(item: GifItem, src: string): string[] | null {
-    const q = quality();
-    if (!klipy || !settings.store.klipyLookup || q === "original") return null;
-    // Search and trending results get small versions from lookupLowRes, in one request per page
-    if (!isFavoriteItem(item)) return null;
-    if (apiPreviews.has(`${q}:${item.id}`) || apiPreviews.has(`${q}:${item.url}`)) return null;
-    if (!isKlipyUrl(src) || !klipy.canResolve(item.url)) return null;
-    const formats = klipyFavoriteFormats(isVideoUrl(src), GIFPickerViewStore.getSelectedFormat(), q);
-    return formats.length ? formats : null;
-}
-
-/** A pending lookup for `item`, or null when its preview URL is already known */
-function klipyLookupFor(item: GifItem, src: string): Promise<unknown> | null {
-    const formats = klipyFormats(item, src);
-    if (!formats || klipy!.peek(item.url, formats) !== undefined) return null;
-    return klipy!.resolve(item.url!, formats);
-}
-
-/** The URL a tile should display. Never changes what gets sent. */
-function pickSrc(item: GifItem, src: string): string {
-    const original = normalizeUrl(src);
-    const q = quality();
-    if (q === "original") return original;
-
-    const formats = klipyFormats(item, src);
-    const low = apiPreviews.get(`${q}:${item.id}`)
-        ?? apiPreviews.get(`${q}:${item.url}`)
-        ?? (formats && klipy!.peek(item.url, formats))
-        ?? rewriteUrl(original, q, item);
-
-    if (!low || low === original || failed.has(low)) return original;
-    // Must stay the same media type or the picker would render it with the wrong element
-    if (isVideoUrl(low) !== isVideoUrl(original)) return original;
-    return low;
-}
-
-interface StillSource {
-    url: string;
-    /** true when `url` is animated and the first frame has to be captured locally */
-    capture: boolean;
-}
-
-/** What a still favourite shows: a still rendition if the source has one, else a frame of the preview */
-function pickStill(item: GifItem, src: string): StillSource {
-    const frame = stillUrl(normalizeUrl(src), quality(), item);
-    if (frame && !failed.has(frame)) return { url: frame, capture: false };
-    return { url: pickSrc(item, src), capture: true };
-}
-
-/** Favourites come from the frecency settings: they have an `order` and no `id` */
-function isFavoriteItem(item: GifItem) {
-    return typeof item.order === "number" && item.id == null;
-}
-
-function isFavorites(resultType: unknown, item: GifItem) {
-    if (typeof resultType === "string" && /favou?rite/i.test(resultType)) return true;
-    return isFavoriteItem(item);
-}
-
-/* -------------------------------------------------------------------------- */
-/*                               Visibility                                   */
-/* -------------------------------------------------------------------------- */
-
-/** element -> its scrolling ancestor (or null for the window). Every node on the way is cached too. */
-const scrollerOf = new WeakMap<Element, Element | null>();
-
-function findScroller(el: Element): Element | null {
-    const path: Element[] = [];
-    let found: Element | null = null;
-    for (let n = el.parentElement; n; n = n.parentElement) {
-        if (scrollerOf.has(n)) {
-            found = scrollerOf.get(n)!;
-            break;
-        }
-        path.push(n);
-        const { overflowY } = getComputedStyle(n);
-        if (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") {
-            found = n;
-            break;
-        }
-    }
-    for (const n of path) scrollerOf.set(n, found);
-    return found;
-}
-
-/**
- * IntersectionObservers rooted on the picker's own scroller. Rooted on the window,
- * `rootMargin` would do nothing, because the scroller clips the tiles first.
- */
-class ViewportWatcher {
-    /**
-     * One observer per scroller and margin, counting the elements it watches.
-     * The picker's scroller is a new element every time the picker opens, so an
-     * observer is disconnected and dropped with its last element. Kept, it would
-     * hold the closed picker's whole DOM in memory.
-     */
-    private observers = new Map<string, { io: IntersectionObserver; count: number; }>();
-    private callbacks = new Map<Element, (isIntersecting: boolean) => void>();
-    private keyOf = new Map<Element, string>();
-    private rootIds = new WeakMap<Element, number>();
-    private nextRootId = 1;
-
-    constructor(private margin: () => number) { }
-
-    observe(el: Element, cb: (isIntersecting: boolean) => void) {
-        if (this.keyOf.has(el)) this.unobserve(el);
-        const root = findScroller(el);
-        const margin = this.margin();
-        let rootId = 0;
-        if (root) {
-            rootId = this.rootIds.get(root) ?? this.nextRootId++;
-            this.rootIds.set(root, rootId);
-        }
-        const key = `${rootId}:${margin}`;
-
-        let entry = this.observers.get(key);
-        if (!entry) {
-            const io = new IntersectionObserver(entries => {
-                for (const e of entries) this.callbacks.get(e.target)?.(e.isIntersecting);
-            }, { root, rootMargin: `${margin}px 0px` });
-            entry = { io, count: 0 };
-            this.observers.set(key, entry);
-        }
-
-        entry.count++;
-        this.callbacks.set(el, cb);
-        this.keyOf.set(el, key);
-        entry.io.observe(el);
-    }
-
-    unobserve(el: Element) {
-        this.callbacks.delete(el);
-        const key = this.keyOf.get(el);
-        if (key == null) return;
-        this.keyOf.delete(el);
-        const entry = this.observers.get(key);
-        if (!entry) return;
-        entry.io.unobserve(el);
-        if (--entry.count <= 0) {
-            entry.io.disconnect();
-            this.observers.delete(key);
-        }
-    }
-
-    /** Observes everything again, with the current margin */
-    refresh() {
-        for (const [el, cb] of [...this.callbacks]) this.observe(el, cb);
-    }
-
-    disconnect() {
-        for (const { io } of this.observers.values()) io.disconnect();
-        this.observers.clear();
-        this.callbacks.clear();
-        this.keyOf.clear();
-    }
-}
-
-/** "On screen" for the load queue's priority */
-const visibleWatcher = new ViewportWatcher(() => 50);
-/** "Near the screen": tiles outside of this are unloaded */
-const nearWatcher = new ViewportWatcher(() => settings.store.offscreenMargin);
-
-/**
- * Watches whichever element the ref is attached to (the placeholder, the still
- * tile, or a sentinel inside Discord's tile) and reports whether it's near the screen.
- */
-function useViewport(onVisible: (visible: boolean) => void) {
-    const [near, setNear] = useState(true);
-    const elRef = useRef<Element | null>(null);
-    const cb = useRef(onVisible);
-    cb.current = onVisible;
-
-    const ref = useCallback((el: Element | null) => {
-        if (elRef.current === el) return;
-        if (elRef.current) {
-            visibleWatcher.unobserve(elRef.current);
-            nearWatcher.unobserve(elRef.current);
-        }
-        elRef.current = el;
-        if (el) {
-            visibleWatcher.observe(el, v => cb.current(v));
-            nearWatcher.observe(el, setNear);
-        }
-    }, []);
-
-    return [ref, near] as const;
-}
-
-/* -------------------------------------------------------------------------- */
-/*                                  UI                                        */
-/* -------------------------------------------------------------------------- */
-
-const RING_R = 11;
-const RING_C = 2 * Math.PI * RING_R;
-
-function Indicator({ state, progress }: { state: "queued" | "loading"; progress?: number | null; }) {
-    const determinate = state === "loading" && progress != null;
-    return (
-        <div className={cl("indicator", `indicator-${state}`)} aria-hidden="true">
-            <svg width="28" height="28" viewBox="0 0 28 28" className={cl("ring", { "ring-spin": state === "loading" && !determinate })}>
-                <circle className={cl("track")} cx="14" cy="14" r={RING_R} />
-                {state === "loading" && (
-                    <circle
-                        className={cl("bar")}
-                        cx="14"
-                        cy="14"
-                        r={RING_R}
-                        strokeDasharray={RING_C}
-                        strokeDashoffset={determinate ? RING_C * (1 - Math.min(1, Math.max(0, progress!))) : RING_C * 0.72}
-                    />
-                )}
-            </svg>
-            {determinate && <span className={cl("pct")}>{Math.round(progress! * 100)}%</span>}
-        </div>
-    );
-}
-
-interface WatcherProps {
-    src: string;
-    video: boolean;
-    showProgress: boolean;
-    onDone(): void;
-    onError(): void;
-}
-
-/**
- * Rendered inside Discord's GIF tile (through renderExtras). Watches the tile's
- * <video>/<img> for load events and draws the progress overlay.
- */
-function LoadOverlay({ src, video, showProgress, onDone, onError }: WatcherProps) {
-    const ref = useRef<HTMLDivElement>(null);
-    const [progress, setProgress] = useState<number | null>(null);
-    const cbs = useRef({ onDone, onError });
-    cbs.current = { onDone, onError };
-
-    useEffect(() => {
-        const root = ref.current?.parentElement;
-        if (!root) return;
-
-        let finished = false;
-        const finish = (ok: boolean) => {
-            if (finished) return;
-            finished = true;
-            ok ? cbs.current.onDone() : cbs.current.onError();
-        };
-
-        const reportBuffered = (v: HTMLVideoElement) => {
-            if (!(v.duration > 0) || !v.buffered.length) return;
-            const p = v.buffered.end(v.buffered.length - 1) / v.duration;
-            setProgress(p);
-            if (p >= 0.999) finish(true);
-        };
-
-        const onMedia = (e: Event) => {
-            const v = e.target;
-            if (!(v instanceof HTMLVideoElement)) return;
-            // Discord clears src when returning the element to its pool
-            if (!v.getAttribute("src")) return;
-            switch (e.type) {
-                case "progress":
-                case "loadedmetadata":
-                case "durationchange":
-                    reportBuffered(v);
-                    break;
-                case "canplaythrough":
-                    setProgress(1);
-                    finish(true);
-                    break;
-                case "error":
-                    finish(false);
-                    break;
-            }
-        };
-
-        const events = ["progress", "loadedmetadata", "durationchange", "canplaythrough", "error"];
-        let probe: HTMLImageElement | null = null;
-        let check: ReturnType<typeof setTimeout> | undefined;
-
-        if (video) {
-            for (const ev of events) root.addEventListener(ev, onMedia, true);
-            // The video may already be ready (cache) before we started listening
-            check = setTimeout(() => {
-                const v = root.querySelector("video");
-                if (v?.getAttribute("src") && v.readyState >= 4) finish(true);
-            }, 50);
-        } else {
-            // Discord preloads images on a detached <img>, so watch the same URL.
-            // The browser shares the request, it isn't downloaded twice.
-            probe = new Image();
-            probe.onload = () => finish(true);
-            probe.onerror = () => finish(false);
-            probe.src = src;
-        }
-
-        return () => {
-            finished = true;
-            clearTimeout(check);
-            for (const ev of events) root.removeEventListener(ev, onMedia, true);
-            if (probe) probe.onload = probe.onerror = null;
-        };
-    }, [src, video]);
-
-    return (
-        <div ref={ref} className={cl("overlay")}>
-            {showProgress && <Indicator state="loading" progress={progress} />}
-        </div>
-    );
-}
-
-/**
- * Draws `frame` into `canvas` like `object-fit: cover`. False when it couldn't:
- * a frame evicted from the cache is closed (0×0) and can't be drawn any more.
- */
-function drawCover(canvas: HTMLCanvasElement, frame: CanvasImageSource & { width: number; height: number; }): boolean {
-    const ctx = canvas.getContext("2d");
-    if (!ctx || !frame.width || !frame.height) return false;
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const cw = Math.max(1, Math.round((rect.width || frame.width) * dpr));
-    const ch = Math.max(1, Math.round((rect.height || frame.height) * dpr));
-    if (canvas.width !== cw) canvas.width = cw;
-    if (canvas.height !== ch) canvas.height = ch;
-    const scale = Math.max(cw / frame.width, ch / frame.height);
-    const w = frame.width * scale;
-    const h = frame.height * scale;
-    ctx.clearRect(0, 0, cw, ch);
-    try {
-        ctx.drawImage(frame, (cw - w) / 2, (ch - h) / 2, w, h);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Size to keep a `w`×`h` frame at so it still covers a `target` sized tile
- * (object-fit: cover) without upscaling. Null keeps the natural size.
- */
-function coverSize(w: number, h: number, target?: { width: number; height: number; }) {
-    if (!w || !h || !target?.width || !target?.height) return null;
-    const scale = Math.min(1, Math.max(target.width / w, target.height / h));
-    if (scale >= 1) return null;
-    return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
-}
-
-/** Loads `url` (image or video) and returns its first frame at about `target` size (device pixels), cached */
-function captureFrame(url: string, video: boolean, signal: { cancelled: boolean; }, target?: { width: number; height: number; }): Promise<ImageBitmap | HTMLCanvasElement> {
-    const cached = frames.get(url);
-    if (cached) return Promise.resolve(cached);
-
-    return new Promise((resolve, reject) => {
-        const el = video ? document.createElement("video") : new Image();
-        const cleanup = () => {
-            el.onerror = null;
-            if (el instanceof HTMLVideoElement) {
-                el.onloadeddata = null;
-                // Free the decoder right away
-                el.removeAttribute("src");
-                el.load();
-            } else {
-                el.onload = null;
-            }
-        };
-        const ready = async () => {
-            try {
-                if (signal.cancelled) throw new Error("cancelled");
-                const w = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
-                const h = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight;
-                const size = coverSize(w, h, target);
-                let frame: ImageBitmap | HTMLCanvasElement;
-                try {
-                    frame = await createImageBitmap(el, size
-                        ? { resizeWidth: size.width, resizeHeight: size.height, resizeQuality: "medium" }
-                        : undefined);
-                } catch {
-                    // Fall back to copying the frame onto a canvas
-                    frame = document.createElement("canvas");
-                    frame.width = size?.width ?? w;
-                    frame.height = size?.height ?? h;
-                    frame.getContext("2d")!.drawImage(el, 0, 0, frame.width, frame.height);
-                }
-                frames.set(url, frame);
-                resolve(frame);
-            } catch (e) {
-                reject(e);
-            } finally {
-                cleanup();
-            }
-        };
-
-        el.onerror = () => {
-            cleanup();
-            reject(new Error(`Couldn't load ${url}`));
-        };
-        if (el instanceof HTMLVideoElement) {
-            el.muted = true;
-            el.preload = "auto";
-            el.onloadeddata = ready;
-        } else {
-            el.decoding = "async";
-            el.onload = ready;
-        }
-        el.src = url;
-    });
-}
-
-interface StillTileProps {
-    viewRef(el: Element | null): void;
-    source: StillSource;
-    video: boolean;
-    loading: boolean;
-    showProgress: boolean;
-    coords: ResultProps["coords"];
-    onClick(e: MouseEvent): void;
-    onContextMenu(e: MouseEvent): void;
-    extras: ReactNode;
-    onDone(): void;
-    onError(): void;
-}
-
-/** A favourite shown as a still image instead of Discord's (animated) tile */
-function StillTile({ viewRef, source, video, loading, showProgress, coords, onClick, onContextMenu, extras, onDone, onError }: StillTileProps) {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const cbs = useRef({ onDone, onError });
-    cbs.current = { onDone, onError };
-
-    useEffect(() => {
-        if (!source.capture) return;
-        const signal = { cancelled: false };
-        const rect = canvasRef.current?.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        const target = rect && rect.width > 0 && rect.height > 0
-            ? { width: Math.round(rect.width * dpr), height: Math.round(rect.height * dpr) }
-            : undefined;
-        const run = (retry: boolean): Promise<void> => captureFrame(source.url, video, signal, target).then(frame => {
-            if (signal.cancelled) return;
-            if (canvasRef.current && !drawCover(canvasRef.current, frame)) {
-                // Evicted from the cache (and closed) before it was drawn: capture it again
-                if (retry) return run(false);
-                throw new Error("Couldn't draw the still frame");
-            }
-            cbs.current.onDone();
-        });
-        run(true).catch(() => !signal.cancelled && cbs.current.onError());
-        return () => void (signal.cancelled = true);
-    }, [source.url, source.capture, video]);
-
-    return (
-        <div
-            ref={viewRef}
-            className={cl("tile", "tile-still")}
-            style={coords}
-            onClick={onClick}
-            onContextMenu={onContextMenu}
-        >
-            {source.capture
-                ? <canvas ref={canvasRef} className={cl("still-media")} />
-                : (
-                    <img
-                        className={cl("still-media")}
-                        src={source.url}
-                        alt=""
-                        draggable={false}
-                        decoding="async"
-                        onLoad={() => cbs.current.onDone()}
-                        onError={() => cbs.current.onError()}
-                    />
-                )}
-            {loading && showProgress && <Indicator state="loading" />}
-            {extras}
-        </div>
-    );
-}
-
-/** resolving: looking up the small Klipy URL before loading */
-type Phase = "queued" | "resolving" | "loading" | "done";
-
-interface ResultProps {
-    Result: ComponentType<any>;
-    resultType?: unknown;
-    item: GifItem;
-    index: number;
-    src: string;
-    format?: number;
-    coords: { top?: number; left?: number; width: number; height: number; [k: string]: any; };
-    onClick?(item: GifItem, index: number, opts: { shiftKey: boolean; }): void;
-    onContextMenu?(e: MouseEvent, item: GifItem): void;
-    renderExtras?(item: GifItem): ReactNode;
-    [k: string]: any;
-}
-
-// GIFType.VIDEO in Discord's frecency protobuf
-const GIF_TYPE_VIDEO = 2;
-
-function SequentialResultInner(props: ResultProps) {
-    const { Result, resultType, ...rest } = props;
-    const { item, src, coords } = rest;
-    const {
-        sequential, concurrency, prioritizeVisible, loadTimeout, showProgress,
-        unloadOffscreen, stillFavorites,
-    } = settings.use([
-        "sequential", "concurrency", "prioritizeVisible", "loadTimeout", "showProgress", "quality",
-        "unloadOffscreen", "offscreenMargin", "stillFavorites",
-    ]);
-
-    const still = stillFavorites && isFavorites(resultType, item);
-    /** The URL this tile shows, for the current mode */
-    const pick = () => still ? pickStill(item, src).url : pickSrc(item, src);
-
-    const indexRef = useRef(rest.index);
-    indexRef.current = rest.index;
-    const ticketRef = useRef<Ticket | null>(null);
-    const visibleRef = useRef(false);
-
-    const [chosen, setChosen] = useState<string | null>(() => {
-        const p = pick();
-        return loaded.hit(p) ? p : null;
-    });
-    const [phase, setPhase] = useState<Phase>(() => chosen ? "done" : "queued");
-
-    const [viewRef, near] = useViewport(visible => {
-        visibleRef.current = visible;
-        const t = ticketRef.current;
-        if (t && t.visible !== visible) {
-            t.visible = visible;
-            queue.kick();
-        }
-    });
-    const parked = unloadOffscreen && !near;
-
-    // Wait for a turn in the load queue (only while near the screen)
-    useEffect(() => {
-        if (phase !== "queued" || parked) return;
-
-        // Came back on screen and was loaded before: show it from cache right away
-        const cached = pick();
-        if (loaded.hit(cached)) {
-            setChosen(cached);
-            setPhase("done");
-            return;
-        }
-
-        queue.concurrency = sequential ? concurrency : 64;
-        queue.prioritizeVisible = prioritizeVisible;
-
-        let started = false;
-        const begin = () => {
-            const p = pick();
-            setChosen(p);
-            if (loaded.hit(p)) {
-                queue.finish(ticket);
-                setPhase("done");
-            } else {
-                setPhase("loading");
-            }
-        };
-        const ticket: Ticket = {
-            visible: visibleRef.current,
-            order: () => indexRef.current ?? 0,
-            start: () => {
-                started = true;
-                try {
-                    const lookup = klipyLookupFor(item, src);
-                    if (!lookup) return begin();
-                    setPhase("resolving");
-                    // A lookup never holds a tile longer than the load timeout
-                    Promise.race([lookup, wait(loadTimeout * 1000)])
-                        .catch(() => { })
-                        .then(() => !dropped.has(ticket) && begin());
-                } catch (e) {
-                    logger.error("Couldn't start loading a GIF", e);
-                    setChosen(normalizeUrl(src));
-                    setPhase("loading");
-                }
-            },
-        };
-        ticketRef.current = ticket;
-        queue.enqueue(ticket);
-
-        // Once started, the slot is freed by finishing, parking or unmounting instead
-        return () => {
-            if (!started) drop(ticket);
-        };
-    }, [phase, parked, still]);
-
-    // Scrolled far away while loading: stop, free the slot, and queue again when it comes back
-    useEffect(() => {
-        if (!parked || (phase !== "loading" && phase !== "resolving")) return;
-        drop(ticketRef.current);
-        setPhase("queued");
-    }, [parked, phase]);
-
-    // The still favourites setting changed: pick the URL again
-    const stillRef = useRef(still);
-    useEffect(() => {
-        if (stillRef.current === still) return;
-        stillRef.current = still;
-        drop(ticketRef.current);
-        setChosen(null);
-        setPhase("queued");
-    }, [still]);
-
-    // Release the slot after the timeout so one slow GIF doesn't hold everything up
-    useEffect(() => {
-        if (phase !== "loading" && phase !== "resolving") return;
-        const t = setTimeout(() => ticketRef.current && queue.finish(ticketRef.current), loadTimeout * 1000);
-        return () => clearTimeout(t);
-    }, [phase, chosen]);
-
-    // Unmounted while loading: free the slot
-    useEffect(() => () => drop(ticketRef.current), []);
-
-    const original = normalizeUrl(src);
-
-    const onDone = () => {
-        if (chosen) loaded.mark(chosen);
-        if (phase !== "loading") return;
-        if (ticketRef.current) queue.finish(ticketRef.current);
-        setPhase("done");
+import { disconnectWatchers } from "./viewport";
+
+migratePluginSettings(PLUGIN_NAME, OLD_PLUGIN_NAME);
+settingsPanels.favorites = () => <FavoritesSettings />;
+
+/** Saves are batched (persist.ts), so save right away when Discord closes or is hidden */
+const flushWhenHidden = () => {
+    if (document.visibilityState === "hidden") flushSaved();
+};
+let stopWatchingConnection: (() => void) | undefined;
+
+/** A saved URL list ([url, when] pairs) in Vencord's DataStore */
+function savedList(key: string): UrlListStore {
+    return {
+        load: () => DataStore.get<[string, number][]>(key),
+        save: entries => void DataStore.set(key, entries),
     };
-
-    const onError = () => {
-        if (chosen && chosen !== original) {
-            // Still / preview not available: try the next best one, then the original
-            failed.add(chosen);
-            loaded.delete(chosen);
-            const next = pick();
-            setChosen(next !== chosen ? next : original);
-            if (phase === "done") setPhase("loading");
-            return;
-        }
-        if (ticketRef.current) queue.finish(ticketRef.current);
-        setPhase("done");
-    };
-
-    const click = (e: MouseEvent) => rest.onClick?.(item, rest.index, { shiftKey: e.shiftKey });
-    const contextMenu = (e: MouseEvent) => rest.onContextMenu?.(e, item);
-
-    // Waiting for its turn, being looked up, or unloaded because it's far off screen
-    if (phase === "queued" || phase === "resolving" || parked) {
-        return (
-            <div
-                ref={viewRef}
-                className={cl("tile", { "tile-parked": parked })}
-                style={coords}
-                onClick={click}
-                onContextMenu={contextMenu}
-            >
-                {showProgress && !parked && <Indicator state={phase === "resolving" ? "loading" : "queued"} />}
-                {rest.renderExtras?.(item)}
-            </div>
-        );
-    }
-
-    const shown = chosen ?? original;
-
-    if (still) {
-        // A ready-made still image is shown as is. Anything else is animated: capture its first frame.
-        const source: StillSource = { url: shown, capture: stillUrl(original, quality(), item) !== shown };
-        return (
-            <StillTile
-                key={shown}
-                viewRef={viewRef}
-                source={source}
-                video={source.capture && (rest.format === GIF_TYPE_VIDEO || isVideoUrl(shown))}
-                loading={phase === "loading"}
-                showProgress={showProgress}
-                coords={coords}
-                onClick={click}
-                onContextMenu={contextMenu}
-                extras={rest.renderExtras?.(item)}
-                onDone={onDone}
-                onError={onError}
-            />
-        );
-    }
-
-    const video = rest.format === GIF_TYPE_VIDEO || isVideoUrl(shown);
-
-    return (
-        <Result
-            key={shown}
-            {...rest}
-            src={shown}
-            renderExtras={(it: GifItem) => (
-                <>
-                    {rest.renderExtras?.(it)}
-                    {/* Fills the tile, so the viewport watcher can see Discord's tile */}
-                    <div ref={viewRef} className={cl("sentinel")} aria-hidden="true" />
-                    {/* Also for a preview shown from cache, which may not load any more */}
-                    {(phase === "loading" || shown !== original) && (
-                        <LoadOverlay
-                            src={shown}
-                            video={video}
-                            showProgress={showProgress && phase === "loading"}
-                            onDone={onDone}
-                            onError={onError}
-                        />
-                    )}
-                </>
-            )}
-        />
-    );
 }
-
-/* -------------------------------------------------------------------------- */
-/*                              Cache settings                                */
-/* -------------------------------------------------------------------------- */
-
-/** Rough memory of the failed preview list */
-function failedBytes() {
-    let n = 0;
-    for (const url of failed.values()) n += url.length + 100;
-    return n;
-}
-
-function cacheStats() {
-    const k = klipy?.stats() ?? { saved: 0, recent: 0, bytes: 0 };
-    const memory = loaded.approxBytes() + apiPreviews.approxBytes() + failedBytes() + k.bytes + frames.weight;
-    return [
-        { label: "Loaded GIFs remembered", value: `${loaded.size} of ${loaded.max}` },
-        { label: "Klipy favourite lookups (saved)", value: `${k.saved}, plus ${k.recent} recent search results` },
-        { label: "Search result previews", value: String(apiPreviews.size) },
-        { label: "Previews that failed", value: String(failed.size) },
-        { label: "Still frames", value: `${frames.size} (${formatBytes(frames.weight)} of ${formatBytes(FRAME_BUDGET_BYTES)})` },
-        { label: "Memory used", value: `About ${formatBytes(memory)}` },
-    ];
-}
-
-/** Clears every cache, also the saved Klipy lookups. Tiles look things up again. */
-function resetCaches() {
-    loaded.clear();
-    failed.clear();
-    apiPreviews.clear();
-    frames.clear();
-    if (klipy) klipy.clear();
-    else void DataStore.del(KLIPY_STORE_KEY);
-}
-
-function CacheSettings() {
-    const [, setTick] = useState(0);
-    useEffect(() => {
-        const t = setInterval(() => setTick(n => n + 1), 2000);
-        return () => clearInterval(t);
-    }, []);
-
-    return (
-        <section className={cl("cache")}>
-            <Heading>Cache</Heading>
-            <table className={cl("cache-stats")}>
-                <tbody>
-                    {cacheStats().map(s => (
-                        <tr key={s.label}>
-                            <td><Paragraph>{s.label}</Paragraph></td>
-                            <td><Paragraph>{s.value}</Paragraph></td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-            <Button
-                variant="dangerSecondary"
-                size="small"
-                onClick={() => {
-                    resetCaches();
-                    setTick(n => n + 1);
-                }}
-            >
-                Reset cache
-            </Button>
-            <Paragraph className={cl("cache-note")}>
-                Forgets loaded GIFs, previews, still frames and the saved Klipy lookups. Discord's own image cache isn't touched.
-            </Paragraph>
-        </section>
-    );
-}
-
-const SequentialResult = ErrorBoundary.wrap(SequentialResultInner, {
-    // If anything goes wrong, render Discord's own tile untouched
-    fallback: ({ wrappedProps: { Result, resultType, ...props } }) => <Result {...props} />,
-    displayName: "GifPickerOptimizerResult",
-});
 
 export default definePlugin({
-    name: "GifPickerOptimizer",
-    description: "Loads GIF picker results one by one with a progress indicator, using low resolution previews while still sending the full resolution GIF. Unloads off-screen GIFs and can show favourites as still images.",
+    name: PLUGIN_NAME,
+    description: "Various Tweaks to the Discord's Gif Picker",
     authors: [{ name: "thatkerimguy", id: 0n }],
     settings,
     managedStyle,
 
-    patches: [
-        {
-            // GIF picker results list (masonry of GIF tiles)
-            find: "renderEmptyFavorite",
-            replacement: {
-                match: /(\(0,\i\.jsx\)\()(\i),\{(?=item:(\i),index:\i,format:\3\.format,src:\3\.src)/,
-                replace: "$1$self.SequentialResult,{Result:$2,resultType:this?.props?.resultType,",
-            },
-        },
-        {
-            // GIF picker main page (categories grid): the Favorites tile plus Trending
-            // GIFs and the featured categories. "Favourites only" keeps just the
-            // Favorites tile, and skips fetching the others.
-            find: "hideFavoritesTile:",
-            replacement: [
-                {
-                    // Don't fetch trending categories on mount
-                    match: /0===this\.props\.trendingCategories\.length&&\(0,(\i\.\i)\)\(\)/,
-                    replace: "$self.mountCategories(this.props.trendingCategories,$1)",
-                },
-                {
-                    // The tiles: [favorites, ...trendingCategories]
-                    match: /(this\.memoizedData\(this\.state\.favoritesTile,)this\.props\.trendingCategories/,
-                    replace: "$1$self.featured(this.props.trendingCategories)",
-                },
-                {
-                    // Shows a loading skeleton while there are no trending categories
-                    match: /(trendingCategories:(\i)\}=this\.props;return )0===\2\.length/,
-                    replace: "$1$self.needsCategories($2)",
-                },
-            ],
-        },
-    ],
+    patches,
 
     flux: {
         GIF_PICKER_QUERY_SUCCESS(event: { query?: string; items?: GifItem[]; }) {
-            lookupLowRes(event);
+            runtime.lowRes?.arrived(event).catch(e => logger.warn("Low resolution previews failed", e));
         },
     },
 
-    SequentialResult,
-
-    /** Featured categories shown on the picker's main page (none with "Favourites only") */
-    featured<T>(categories: T[]): T[] {
-        return settings.store.favoritesOnly ? NO_CATEGORIES : categories;
-    },
-
-    /** The main page mounted: fetch featured categories unless they're hidden or loaded */
-    mountCategories(categories: unknown[] | undefined, fetch: () => void) {
-        fetchCategories = fetch;
-        categoriesRequested = false;
-        if (needsCategories(categories)) {
-            categoriesRequested = true;
-            fetch();
-        }
-    },
-
-    /**
-     * Whether the main page waits (loading skeleton) for featured categories.
-     * When they're needed but were skipped on mount (the option was turned off
-     * while the picker was open), this starts the fetch.
-     */
-    needsCategories(categories: unknown[] | undefined): boolean {
-        const needed = needsCategories(categories);
-        if (needed && !categoriesRequested && fetchCategories) {
-            categoriesRequested = true;
-            const fetch = fetchCategories;
-            // Not during render: fetching dispatches
-            setTimeout(() => fetch(), 0);
-        }
-        return needed;
-    },
+    // Used by the patches as $self
+    GifTile,
+    featured,
+    lowResStarted,
+    mountCategories,
+    needsCategories,
 
     start() {
-        loaded.resize(settings.store.cacheSize);
-        klipy = new KlipyResolver({
+        // Patches are seen working when the code they call runs (diagnostics.ts, shown in settings)
+        expectPatch("results", "GIF tiles (one by one, previews)", "open the GIF picker");
+        expectPatch("searchActions", "Early low resolution requests", "search for GIFs or open Trending");
+        expectPatch("categories", "Main page categories (Favourites only)", "open the GIF picker's main page");
+        loadedThisSession.resize(settings.store.cacheSize);
+        seen.attach(savedList(SEEN_STORE_KEY));
+        failed.attach(savedList(FAILED_STORE_KEY));
+        runtime.klipy = new KlipyResolver({
             async search(q, format, limit) {
                 const res = await RestAPI.get({
                     url: "/gifs/search",
@@ -1106,14 +94,31 @@ export default definePlugin({
             save: entries => void DataStore.set(KLIPY_STORE_KEY, entries),
             onError: e => logger.warn("Klipy favourite lookup failed", e),
         });
+        // Precaching was removed: drop its saved list
+        void DataStore.del(OLD_PRECACHE_STORE_KEY);
+        runtime.lowRes = createLowResPages();
+        applyQueueSettings();
+        stopWatchingConnection = onConnectionChange(applyQueueSettings);
+        window.addEventListener("beforeunload", flushSaved);
+        document.addEventListener("visibilitychange", flushWhenHidden);
     },
 
     stop() {
-        klipy?.flush();
-        klipy = undefined;
-        visibleWatcher.disconnect();
-        nearWatcher.disconnect();
-        loaded.clear();
+        stopWatchingConnection?.();
+        stopWatchingConnection = undefined;
+        window.removeEventListener("beforeunload", flushSaved);
+        document.removeEventListener("visibilitychange", flushWhenHidden);
+        seen.detach();
+        failed.detach();
+        runtime.klipy?.stop();
+        runtime.klipy = undefined;
+        runtime.lowRes?.clear();
+        runtime.lowRes = undefined;
+        disconnectWatchers();
+        clearPatches();
+        loadedThisSession.clear();
+        // Like the Valenced build: the patches stay applied until Discord reloads, so drop what was cached
+        apiPreviews.clear();
         frames.clear();
     },
 });

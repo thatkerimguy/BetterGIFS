@@ -1,5 +1,5 @@
 {
 	"name": "KerimsPluginRepo",
-	"description": "Kerim's Valenced plugins. GifPickerOptimizer: sequential loading, low resolution previews, off-screen unloading and still favourites in the GIF picker.",
+	"description": "Kerim's Plugins for Vencord and Valenced",
 	"channels": {}
 }

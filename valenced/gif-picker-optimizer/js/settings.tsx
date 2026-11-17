@@ -1,176 +1,265 @@
+/** @jsxRuntime classic */
+/** @jsx valenced.react.React.createElement */
+/** @jsxFrag valenced.react.React.Fragment */
+/*
+ * The settings page: Previews, Loading, GIF picker, Favourites, Status and cache,
+ * then Restore default settings. The words come from settingsText.ts (shared).
+ * Options with several values are one row showing the current value; tapping it
+ * lists the values right under it (one list open at a time).
+ */
+
 import Page from "@valenced/components/Page";
 import { Design } from "@valenced/discord/design";
 import { useEffect, useState } from "react";
 import { ScrollView } from "react-native";
 
 import type { PluginSettingsComponent } from "@valenced/plugins/types";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactElement } from "react";
 
+import { openConfirmAlert } from "./alerts";
+import { describePatch, PATCHES_NOTE, patchStatuses, summarizePatches } from "./diagnostics";
+import { FavoritesSection } from "./favoritesSettings";
 import type { Quality } from "./lowres";
-import { cacheControl, DefaultSettings, type Settings } from "./shared";
+import type { Settings } from "./settingsStore";
+import { cacheControl, DefaultSettings } from "./settingsStore";
+import { cacheStatRows, cacheSummary, QUALITY_CHOICES, RESTORE_DEFAULTS_CONFIRM, SECTIONS, TEXT } from "./settingsText";
+import { applyQueueSettings } from "./state";
 
-const { Stack, TableRadioGroup, TableRadioRow, TableRow, TableRowGroup, TableSwitchRow } = Design;
+interface Choice<T> {
+    value: T;
+    label: string;
+    detail?: string;
+}
 
-const qualities: { value: Quality; label: string; subLabel: string; }[] = [
-    { value: "xs", label: "XS", subLabel: "Smallest previews, fastest loading" },
-    { value: "s", label: "S", subLabel: "Small previews (Discord's mobile default for Klipy)" },
-    { value: "sd", label: "SD", subLabel: "Medium previews" },
-    { value: "original", label: "Original", subLabel: "Don't downscale previews" },
-];
-
-const concurrencies = [1, 2, 3, 4, 6];
-const timeouts = [5, 10, 20, 30];
-const buffers = [
-    { value: 6, label: "Small", subLabel: "About 3 rows. Least memory." },
-    { value: 12, label: "Medium", subLabel: "About 6 rows. Recommended." },
-    { value: 24, label: "Large", subLabel: "About 12 rows. Less reloading while scrolling." },
-];
-const cacheSizes = [
-    { value: 300, label: "300 GIFs" },
-    { value: 1000, label: "1000 GIFs" },
-    { value: 3000, label: "3000 GIFs" },
-];
+/** Preview sizes ("auto" needs the screen's pixel density, which only the desktop build uses) */
+const QUALITIES: Choice<Quality>[] = QUALITY_CHOICES
+    .filter(c => c.value !== "auto")
+    .map(c => ({ value: c.value as Quality, label: c.label, detail: c.detail }));
+const CONCURRENCIES: Choice<number>[] = [1, 2, 3, 4, 6].map(n => ({
+    value: n,
+    label: `${n} at a time`,
+    detail: n === 1 ? "Strictly one by one" : n === DefaultSettings.concurrency ? "Default" : undefined,
+}));
+const TIMEOUTS: Choice<number>[] = [5, 10, 20, 30].map(s => ({
+    value: s,
+    label: `${s} seconds`,
+    detail: s === DefaultSettings.loadTimeout ? "Default" : undefined,
+}));
+const CACHE_SIZES: Choice<number>[] = [300, 1000, 3000].map(n => ({
+    value: n,
+    label: `${n} GIFs`,
+    detail: n === DefaultSettings.cacheSize ? "Default" : undefined,
+}));
 
 type Props = ComponentProps<PluginSettingsComponent<{ jsonStorage: Settings; }>>;
 
-/** Cache stats (refreshed every 2 seconds while open) and a reset button */
-function CacheSection() {
+/** Re-renders every 2 seconds (live stats). Returns a function that re-renders now. */
+function useTicker() {
     const [, setTick] = useState(0);
     useEffect(() => {
         const t = setInterval(() => setTick(n => n + 1), 2000);
         return () => clearInterval(t);
     }, []);
+    return () => setTick(n => n + 1);
+}
 
-    const stats = cacheControl.stats?.();
-    const reset = cacheControl.reset;
-
-    return (
-        <TableRowGroup title="Cache">
-            {stats
-                ? stats.map(s => <TableRow key={s.label} label={s.label} subLabel={s.value} />)
-                : <TableRow label="Enable the plugin to see its cache" />}
+/**
+ * Rows for a setting with several values: the row with the current value, and the
+ * values under it while it's open. Plain rows, not a fragment, so the group draws
+ * its rounded corners and dividers around each of them.
+ */
+function choiceRows<T>(o: {
+    id: string;
+    label: string;
+    subLabel: string;
+    value: T;
+    choices: Choice<T>[];
+    open: string | null;
+    setOpen(id: string | null): void;
+    onChange(value: T): void;
+}): ReactElement[] {
+    // Read on render: Discord's design module isn't loaded when the script is evaluated (lazy.ts)
+    const { TableRow, Text } = Design;
+    const current = o.choices.find(c => c.value === o.value);
+    const isOpen = o.open === o.id;
+    const rows = [
+        <TableRow
+            key={o.id}
+            label={o.label}
+            subLabel={o.subLabel}
+            trailing={<TableRow.TrailingText text={current?.label ?? String(o.value)} />}
+            arrow={!isOpen}
+            onPress={() => o.setOpen(isOpen ? null : o.id)}
+        />,
+    ];
+    if (!isOpen) return rows;
+    for (const c of o.choices) {
+        rows.push(
             <TableRow
-                label="Reset cache"
-                subLabel="Forgets loaded GIFs, previews and the saved Klipy and Tenor lookups. Discord's own image cache isn't touched."
-                variant="danger"
-                disabled={!reset}
+                key={`${o.id}:${String(c.value)}`}
+                label={c.label}
+                subLabel={c.detail}
+                trailing={c.value === o.value ? <Text variant="text-md/semibold" color="text-strong">✓</Text> : undefined}
                 onPress={() => {
-                    reset?.();
-                    setTick(n => n + 1);
+                    o.onChange(c.value);
+                    o.setOpen(null);
                 }}
-            />
-        </TableRowGroup>
-    );
+            />,
+        );
+    }
+    return rows;
 }
 
 export default function SettingsComponent({ api: { jsonStorage: storage } }: Props) {
+    const { Stack, TableRow, TableRowGroup, TableSwitchRow } = Design;
     const s: Settings = { ...DefaultSettings, ...storage.use() };
     const update = (patch: Partial<Settings>) => storage.set(patch);
+    /** Which multi-value setting lists its values */
+    const [open, setOpen] = useState<string | null>(null);
+    const [showPatches, setShowPatches] = useState(false);
+    const [showCache, setShowCache] = useState(false);
+    const refresh = useTicker();
+
+    const running = !!cacheControl.stats;
+    const statuses = patchStatuses();
+    const numbers = cacheControl.stats?.();
+    const choice = { open, setOpen };
+    const restoreDefaults = () => openConfirmAlert({
+        ...RESTORE_DEFAULTS_CONFIRM,
+        onConfirm: () => {
+            storage.set({ ...DefaultSettings });
+            applyQueueSettings(DefaultSettings);
+            setOpen(null);
+        },
+    });
 
     return (
         <Page>
             {/* Page doesn't scroll by itself, and these settings are taller than the screen */}
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 48 }}>
                 <Stack spacing={24}>
-                    <TableRadioGroup
-                        title="Preview quality (sent GIFs are always full resolution)"
-                        defaultValue={s.quality}
-                        onChange={(quality: Quality) => update({ quality })}
-                    >
-                        {qualities.map(q => (
-                            <TableRadioRow key={q.value} label={q.label} subLabel={q.subLabel} value={q.value} />
-                        ))}
-                    </TableRadioGroup>
-
-                    <TableRowGroup title="Loading">
+                    <TableRowGroup title={SECTIONS.previews.title} description={SECTIONS.previews.description}>
+                        {choiceRows({
+                            ...choice,
+                            id: "quality",
+                            label: TEXT.quality.title,
+                            subLabel: QUALITIES.find(q => q.value === s.quality)?.detail ?? TEXT.quality.description,
+                            value: s.quality,
+                            choices: QUALITIES,
+                            onChange: quality => update({ quality }),
+                        })}
                         <TableSwitchRow
-                            label="Sequential loading"
-                            subLabel="Load GIFs one after another, left to right and top to bottom"
-                            value={s.sequential}
-                            onValueChange={(sequential: boolean) => update({ sequential })}
-                        />
-                        <TableSwitchRow
-                            label="Show loading progress"
-                            subLabel="Show an indicator on GIFs that haven't loaded yet"
-                            value={s.showProgress}
-                            onValueChange={(showProgress: boolean) => update({ showProgress })}
-                        />
-                        <TableSwitchRow
-                            label="Small Klipy previews"
-                            subLabel="Ask Discord's GIF API for the smaller Klipy files (one extra request per search page)"
+                            label={TEXT.klipyLookup.title}
+                            subLabel={TEXT.klipyLookup.description}
                             value={s.klipyLookup}
                             onValueChange={(klipyLookup: boolean) => update({ klipyLookup })}
                         />
-                    </TableRowGroup>
-
-                    <TableRowGroup title="Performance">
                         <TableSwitchRow
-                            label="Unload off-screen GIFs"
-                            subLabel="Free memory by unloading GIFs you scrolled far away from. They come back from cache when you scroll back."
-                            value={s.unloadOffscreen}
-                            onValueChange={(unloadOffscreen: boolean) => update({ unloadOffscreen })}
-                        />
-                        <TableSwitchRow
-                            label="Still previews in favourites"
-                            subLabel="Show a still image instead of a playing GIF in the favourites tab (Tenor, Giphy, Twitter and Discord links). Sent GIFs still animate."
+                            label={TEXT.stillFavorites.title}
+                            subLabel={`${TEXT.stillFavorites.description} Works for Tenor, Giphy, Twitter and Discord links.`}
                             value={s.stillFavorites}
                             onValueChange={(stillFavorites: boolean) => update({ stillFavorites })}
                         />
+                    </TableRowGroup>
+
+                    <TableRowGroup title={SECTIONS.loading.title} description={SECTIONS.loading.description}>
                         <TableSwitchRow
-                            label="Favourites only"
-                            subLabel="Hide Trending GIFs and the other featured categories. The GIF tab's main page keeps search and the Favorites category."
+                            label={TEXT.sequential.title}
+                            subLabel={TEXT.sequential.description}
+                            value={s.sequential}
+                            onValueChange={(sequential: boolean) => update({ sequential })}
+                        />
+                        {s.sequential ? choiceRows({
+                            ...choice,
+                            id: "concurrency",
+                            label: TEXT.concurrency.title,
+                            subLabel: TEXT.concurrency.description,
+                            value: s.concurrency,
+                            choices: CONCURRENCIES,
+                            onChange: concurrency => update({ concurrency }),
+                        }) : null}
+                        {s.sequential ? choiceRows({
+                            ...choice,
+                            id: "loadTimeout",
+                            label: TEXT.loadTimeout.title,
+                            subLabel: TEXT.loadTimeout.description,
+                            value: s.loadTimeout,
+                            choices: TIMEOUTS,
+                            onChange: loadTimeout => update({ loadTimeout }),
+                        }) : null}
+                        <TableSwitchRow
+                            label={TEXT.showProgress.title}
+                            subLabel={TEXT.showProgress.description}
+                            value={s.showProgress}
+                            onValueChange={(showProgress: boolean) => update({ showProgress })}
+                        />
+                    </TableRowGroup>
+
+                    <TableRowGroup title={SECTIONS.picker.title}>
+                        <TableSwitchRow
+                            label={TEXT.favoritesOnly.title}
+                            subLabel={TEXT.favoritesOnly.description}
                             value={s.favoritesOnly}
                             onValueChange={(favoritesOnly: boolean) => update({ favoritesOnly })}
                         />
                         <TableSwitchRow
-                            label="Faster GIF tab switch"
-                            subLabel="Switch to the GIF tab right away and build the picker a moment later, instead of freezing until it's ready"
+                            label={TEXT.fastTabSwitch.title}
+                            subLabel={TEXT.fastTabSwitch.description}
                             value={s.fastTabSwitch}
                             onValueChange={(fastTabSwitch: boolean) => update({ fastTabSwitch })}
                         />
                     </TableRowGroup>
 
-                    <TableRadioGroup
-                        title="Keep loaded around the screen"
-                        defaultValue={String(s.offscreenBuffer)}
-                        onChange={(v: string) => update({ offscreenBuffer: Number(v) })}
-                    >
-                        {buffers.map(b => (
-                            <TableRadioRow key={b.value} label={b.label} subLabel={b.subLabel} value={String(b.value)} />
-                        ))}
-                    </TableRadioGroup>
+                    <FavoritesSection />
 
-                    <TableRadioGroup
-                        title="Remember loaded GIFs"
-                        defaultValue={String(s.cacheSize)}
-                        onChange={(v: string) => update({ cacheSize: Number(v) })}
-                    >
-                        {cacheSizes.map(c => (
-                            <TableRadioRow key={c.value} label={c.label} value={String(c.value)} />
-                        ))}
-                    </TableRadioGroup>
+                    <TableRowGroup title={SECTIONS.status.title} description={SECTIONS.status.description}>
+                        <TableRow
+                            label="Patches"
+                            subLabel={summarizePatches(statuses)}
+                            arrow={running && !showPatches}
+                            disabled={!running}
+                            onPress={() => setShowPatches(v => !v)}
+                        />
+                        {showPatches ? statuses.map(p => <TableRow key={p.label} label={p.label} subLabel={describePatch(p)} />) : null}
+                        {showPatches ? <TableRow key="patches-note" label="About patches" subLabel={PATCHES_NOTE} /> : null}
+                        {choiceRows({
+                            ...choice,
+                            id: "cacheSize",
+                            label: TEXT.cacheSize.title,
+                            subLabel: TEXT.cacheSize.description,
+                            value: s.cacheSize,
+                            choices: CACHE_SIZES,
+                            onChange: cacheSize => update({ cacheSize }),
+                        })}
+                        <TableRow
+                            label="Cache"
+                            subLabel={numbers ? cacheSummary(numbers) : "Enable the plugin to see its cache"}
+                            arrow={running && !showCache}
+                            disabled={!running}
+                            onPress={() => setShowCache(v => !v)}
+                        />
+                        {showCache && numbers ? cacheStatRows(numbers).map(st => (
+                            <TableRow key={st.label} label={st.label} subLabel={st.value} />
+                        )) : null}
+                        <TableRow
+                            label={TEXT.resetCache.title}
+                            subLabel={TEXT.resetCache.description}
+                            variant="danger"
+                            disabled={!cacheControl.reset}
+                            onPress={() => {
+                                cacheControl.reset?.();
+                                refresh();
+                            }}
+                        />
+                    </TableRowGroup>
 
-                    <TableRadioGroup
-                        title="GIFs loading at the same time"
-                        defaultValue={String(s.concurrency)}
-                        onChange={(v: string) => update({ concurrency: Number(v) })}
-                    >
-                        {concurrencies.map(c => (
-                            <TableRadioRow key={c} label={String(c)} value={String(c)} />
-                        ))}
-                    </TableRadioGroup>
-
-                    <TableRadioGroup
-                        title="Move on from a slow GIF after"
-                        defaultValue={String(s.loadTimeout)}
-                        onChange={(v: string) => update({ loadTimeout: Number(v) })}
-                    >
-                        {timeouts.map(t => (
-                            <TableRadioRow key={t} label={`${t} seconds`} value={String(t)} />
-                        ))}
-                    </TableRadioGroup>
-
-                    <CacheSection />
+                    <TableRowGroup>
+                        <TableRow
+                            label={TEXT.restoreDefaults.title}
+                            subLabel={TEXT.restoreDefaults.description}
+                            onPress={restoreDefaults}
+                        />
+                    </TableRowGroup>
                 </Stack>
             </ScrollView>
         </Page>

@@ -1,5 +1,5 @@
 /*
- * GifPickerOptimizer — low resolution preview URL helpers.
+ * GIFs+ — low resolution preview URL helpers.
  * Shared between the Vencord and Valenced builds (keep both copies in sync).
  *
  * Only the URL that the picker *displays* is changed. The item objects that
@@ -54,8 +54,9 @@ const EXTERNAL_PATH_RE = /^\/external\/[^/]+\/(https?)\/(.+)$/i;
 /** Hosts whose own small renditions beat resizing through Discord's proxy */
 const UNWRAP_HOSTS_RE = /(^|\.)(tenor\.com|tenor\.co|giphy\.com|klipy\.com|twimg\.com)$/i;
 
+/** Absolute https URL */
 export function normalizeUrl(url: string): string {
-    return url.startsWith("//") ? "https:" + url : url;
+    return url.startsWith("//") ? `https:${url}` : url;
 }
 
 /** Minimal URL model: enough to read the host/path and add query parameters */
@@ -97,7 +98,7 @@ function setParam(u: ParsedUrl, key: string, value: string) {
 }
 
 function stringifyUrl(u: ParsedUrl): string {
-    const search = u.params.length ? "?" + u.params.map(([k, v]) => `${k}=${v}`).join("&") : "";
+    const search = u.params.length ? `?${u.params.map(([k, v]) => `${k}=${v}`).join("&")}` : "";
     return `${u.protocol}//${u.host}${u.pathname}${search}${u.hash}`;
 }
 
@@ -131,6 +132,34 @@ function sourceUrl(url: string): string {
         if (host && UNWRAP_HOSTS_RE.test(host)) return inner;
     }
     return normalizeUrl(url);
+}
+
+/**
+ * For a URL Discord's media proxy can resize (CDN attachments, media.discordapp.net,
+ * images-ext), points it at the proxy and returns true. False for anything else.
+ */
+function toMediaProxy(u: ParsedUrl): boolean {
+    const isCdnAttachment = u.hostname === "cdn.discordapp.com" && /^\/(ephemeral-)?attachments\//.test(u.pathname);
+    if (isCdnAttachment) u.host = u.hostname = "media.discordapp.net";
+    return isCdnAttachment || u.hostname === "media.discordapp.net" || IMAGES_EXT_RE.test(u.hostname);
+}
+
+/**
+ * Asks the media proxy for `quality`'s size, keeping the aspect ratio and never
+ * bigger than the original. False when the original is known to be no bigger.
+ */
+function setProxySize(u: ParsedUrl, quality: Exclude<Quality, "original">, dims?: { width?: number; height?: number; }): boolean {
+    const cap = QUALITY_CAP[quality];
+    const w = dims?.width ?? 0;
+    const h = dims?.height ?? 0;
+    if (!(w > 0 && h > 0)) {
+        setParam(u, "width", String(cap));
+        return true;
+    }
+    const scale = Math.min(1, cap / Math.max(w, h));
+    setParam(u, "width", String(Math.max(1, Math.round(w * scale))));
+    setParam(u, "height", String(Math.max(1, Math.round(h * scale))));
+    return scale < 1;
 }
 
 export function isVideoUrl(url: string): boolean {
@@ -194,31 +223,19 @@ export function rewriteUrl(src: string, quality: Quality, dims?: { width?: numbe
     }
 
     // Discord CDN, media proxy and external media proxy (images-ext, used for vx/fx/twitter and every other embed)
-    const isCdnAttachment = host === "cdn.discordapp.com" && /^\/(ephemeral-)?attachments\//.test(u.pathname);
-    if (isCdnAttachment || host === "media.discordapp.net" || IMAGES_EXT_RE.test(host)) {
-        const path = mediaPath(u);
+    const path = mediaPath(u);
+    if (toMediaProxy(u)) {
         const isVideo = VIDEO_EXT_RE.test(path);
         // Desktop plays these as videos, and the media proxy can't shrink a video into
         // a video. Mobile shows proxied videos as animated webp (`animated=true`, like
         // Discord mobile itself), and that can be resized like any image.
         if (isVideo && !(imagesOnly && IMAGES_EXT_RE.test(host))) return null;
 
-        if (isCdnAttachment) u.host = u.hostname = "media.discordapp.net";
+        // Already small: only worth proxying to turn a GIF or video into webp
+        if (!setProxySize(u, quality, dims) && !path.endsWith(".gif") && !isVideo) return null;
 
-        const cap = QUALITY_CAP[quality];
-        const w = dims?.width ?? 0;
-        const h = dims?.height ?? 0;
-        if (w > 0 && h > 0) {
-            // Don't ask for something bigger than the original
-            const scale = Math.min(1, cap / Math.max(w, h));
-            if (scale >= 1 && !path.endsWith(".gif") && !isVideo) return null;
-            setParam(u, "width", String(Math.max(1, Math.round(w * scale))));
-            setParam(u, "height", String(Math.max(1, Math.round(h * scale))));
-        } else {
-            setParam(u, "width", String(cap));
-        }
-
-        if (isVideo || path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".avif") || !/\.(png|jpe?g)$/.test(path)) {
+        // Anything that may be animated (GIF, webp, avif, video, unknown) stays animated as webp
+        if (!/\.(png|jpe?g)$/.test(path)) {
             setParam(u, "format", "webp");
             setParam(u, "animated", "true");
         }
@@ -265,23 +282,9 @@ export function stillUrl(src: string, quality: Quality, dims?: { width?: number;
 
     // Discord's media proxy returns the first frame unless `animated=true` is asked for,
     // and a thumbnail for videos
-    const isCdnAttachment = host === "cdn.discordapp.com" && /^\/(ephemeral-)?attachments\//.test(u.pathname);
-    if (isCdnAttachment || host === "media.discordapp.net" || IMAGES_EXT_RE.test(host)) {
-        if (isCdnAttachment) u.host = u.hostname = "media.discordapp.net";
+    if (toMediaProxy(u)) {
         u.params = u.params.filter(([k]) => k !== "animated");
-
-        if (quality !== "original") {
-            const cap = QUALITY_CAP[quality];
-            const w = dims?.width ?? 0;
-            const h = dims?.height ?? 0;
-            if (w > 0 && h > 0) {
-                const scale = Math.min(1, cap / Math.max(w, h));
-                setParam(u, "width", String(Math.max(1, Math.round(w * scale))));
-                setParam(u, "height", String(Math.max(1, Math.round(h * scale))));
-            } else {
-                setParam(u, "width", String(cap));
-            }
-        }
+        if (quality !== "original") setProxySize(u, quality, dims);
         setParam(u, "format", VIDEO_EXT_RE.test(mediaPath(u)) ? "jpeg" : "webp");
         return stringifyUrl(u);
     }
@@ -310,7 +313,7 @@ export function lowResMediaFormat(selectedFormat: string, quality: Quality): str
 
 // Discord mobile turns Tenor favourites into `<tenor page URL>.gif`, which redirects
 // to the full size GIF on media.tenor.com
-const TENOR_PAGE_GIF_RE = /^https?:\/\/(?:www\.)?tenor\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?view\/[^?#]+\.gif(?:[?#].*)?$/i;
+const TENOR_PAGE_GIF_RE = /^https:\/\/(?:www\.)?tenor\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?view\/[^?#]+\.gif(?:[?#].*)?$/i;
 
 export function isTenorPageGif(url: string): boolean {
     return TENOR_PAGE_GIF_RE.test(normalizeUrl(url));
@@ -321,60 +324,14 @@ export function isTenorMediaUrl(url: string): boolean {
     return TENOR_RE.test(normalizeUrl(url));
 }
 
-/* -------------------------------------------------------------------------- */
-/*                         Klipy favourites lookup                            */
-/* -------------------------------------------------------------------------- */
-
-const KLIPY_PAGE_RE = /^https?:\/\/(?:www\.)?klipy\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:gifs?|stickers?|clips?)\/([^/?#]+)/i;
-
-/** Search query for a Klipy page URL (`https://klipy.com/gifs/guh-lexa-fortnite` -> `guh lexa fortnite`) */
-export function klipyPageQuery(pageUrl: string | undefined): string | null {
-    const m = pageUrl && KLIPY_PAGE_RE.exec(normalizeUrl(pageUrl));
-    if (!m) return null;
-    let slug = m[1];
-    try { slug = decodeURIComponent(slug); } catch { }
-    const q = slug.replace(/[-_]+/g, " ").trim();
-    return q || null;
-}
-
-/** Compares page URLs, ignoring scheme, www, letter case, query and trailing slash */
-export function pageKey(url: string | undefined): string {
-    return normalizeUrl(url ?? "")
-        .replace(/^https?:\/\//i, "")
-        .replace(/^www\./i, "")
-        .replace(/[?#].*$/, "")
-        .replace(/\/+$/, "")
-        .toLowerCase();
-}
-
 /**
- * media_formats to look a Klipy favourite up with, best first. Favourites are
- * usually stored as the full size .gif, so images get a small webp; videos keep
- * their family.
+ * The Tenor media URL a saved favourite's src points at, directly or through
+ * Discord's images-ext proxy, or null when it isn't one. Discord mobile shows
+ * Tenor favourites as their page URL, but the saved src still holds the media URL.
  */
-export function klipyFavoriteFormats(originalIsVideo: boolean, selectedFormat: string, quality: Quality): string[] {
-    if (quality === "original") return [];
-    if (originalIsVideo) {
-        const f = lowResMediaFormat(selectedFormat, quality);
-        return f ? [f] : [];
-    }
-    return quality === "xs" ? ["nanowebp", "tinywebp"] : ["tinywebp"];
-}
-
-/** Simple bounded set (drops oldest entries) */
-export class BoundedSet<T> {
-    private set = new Set<T>();
-    constructor(private max: number) { }
-    get size() { return this.set.size; }
-    values() { return this.set.values(); }
-    has(v: T) { return this.set.has(v); }
-    add(v: T) {
-        this.set.delete(v);
-        this.set.add(v);
-        if (this.set.size > this.max) {
-            const first = this.set.values().next().value as T;
-            this.set.delete(first);
-        }
-    }
-    clear() { this.set.clear(); }
+export function tenorMediaFromSrc(src: string | undefined): string | null {
+    if (!src) return null;
+    const plain = normalizeUrl(src);
+    const url = unwrapProxyUrl(plain) ?? plain;
+    return isTenorMediaUrl(url) ? url : null;
 }

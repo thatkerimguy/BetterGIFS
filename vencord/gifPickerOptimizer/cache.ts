@@ -1,11 +1,10 @@
 /*
- * GifPickerOptimizer — caches.
+ * GIFs+ — caches.
  * Shared between the Vencord and Valenced builds (keep both copies in sync).
  *
- * Tiles that scroll far off screen are unloaded to free memory and decoders.
- * When they scroll back, these caches let them show again at once: a URL that
- * finished loading before skips the load queue and is served from the HTTP /
- * native image cache instead of downloading again.
+ * Discord unmounts tiles that scroll away. When they scroll back, these caches
+ * let them show again at once: a URL that finished loading before skips the load
+ * queue and is served from the HTTP / native image cache instead of downloading again.
  */
 
 /**

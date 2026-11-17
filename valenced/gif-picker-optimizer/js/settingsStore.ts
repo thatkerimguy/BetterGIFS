@@ -1,6 +1,7 @@
 import type { JsonStorage } from "@valenced/json-storage";
 
 import type { Quality } from "./lowres";
+import type { CacheNumbers } from "./settingsText";
 
 export interface Settings {
     quality: Quality;
@@ -9,10 +10,6 @@ export interface Settings {
     loadTimeout: number;
     showProgress: boolean;
     klipyLookup: boolean;
-    /** Unload GIFs that are far off screen and reload them (from cache) when they come back */
-    unloadOffscreen: boolean;
-    /** How many items above/below the visible ones stay loaded */
-    offscreenBuffer: number;
     /** How many loaded GIF URLs to remember, so they show instantly when scrolled back to */
     cacheSize: number;
     /** Show still (not animated) previews in the favourites tab */
@@ -23,31 +20,26 @@ export interface Settings {
     favoritesOnly: boolean;
 }
 
+// `unloadOffscreen` and `offscreenBuffer` (before 1.6.0) may still be in saved settings. They're ignored.
 export const DefaultSettings: Settings = {
-    // Discord mobile already shows the S (tinywebp) rendition of Klipy GIFs
-    quality: "xs",
+    // Discord mobile already asks for tinywebp, so S needs no extra request for Klipy
+    // GIFs. XS would add a nanowebp request per search and show about 90 px previews
+    // on tiles about 540 device px wide.
+    quality: "s",
     sequential: true,
     concurrency: 3,
     loadTimeout: 10,
     showProgress: true,
     klipyLookup: true,
-    unloadOffscreen: true,
-    offscreenBuffer: 12,
     cacheSize: 1000,
     stillFavorites: false,
     fastTabSwitch: true,
     favoritesOnly: false,
 };
 
-/** One line of cache stats in settings */
-export interface CacheStat {
-    label: string;
-    value: string;
-}
-
-/** Set by the plugin while it runs, so settings can show stats and reset the caches */
+/** Set by the plugin while it runs, so settings can show its cache and reset it */
 export const cacheControl: {
-    stats?: () => CacheStat[];
+    stats?: () => CacheNumbers;
     reset?: () => void;
 } = {};
 

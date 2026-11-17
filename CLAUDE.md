@@ -1,11 +1,51 @@
 # KerimsPluginRepo — handoff notes
 
-GifPickerOptimizer: a Discord GIF picker plugin with two builds.
+GIFs+ (called GifPickerOptimizer before 1.6.0): a Discord GIF picker plugin with two builds. The Vencord plugin name is `GIFs+` (Vencord has a built-in `BetterGifPicker`; `migratePluginSettings` moves the old `GifPickerOptimizer` settings). The Valenced id stays `thatkerimguy.gif-picker-optimizer`, its manifest name is `GIFs+`. Source folder names and DataStore keys keep the old names.
 
 - `vencord/gifPickerOptimizer/`: Vencord user plugin for desktop and web. **This is the one being installed and tested now.**
 - `valenced/gif-picker-optimizer/`: plugin for Valenced (github.com/Valenced/valenced), a React Native mobile client mod. Replaced the old Raincord build. Not tested on a device yet.
 
-`lowres.ts`, `queue.ts` and `cache.ts` are identical in `vencord/gifPickerOptimizer/` and `valenced/gif-picker-optimizer/js/`. Change both together.
+The files listed in `.github/scripts/sync-shared.mjs` (async, cache, diagnostics, favoritesBackend, items, klipyLookups, lowResPages, lowres, persist, queue, saved, settingsText, tileLoader, tracking, transfer, tuning) are identical in `vencord/gifPickerOptimizer/` and `valenced/gif-picker-optimizer/js/`. Edit them in the Vencord folder and run `node .github/scripts/sync-shared.mjs` (CI checks it). History: CHANGELOG.md. Testing: TESTING.md.
+
+## Experimental repository (testing)
+
+- `C:\Work\Gifs+\experimental` is a full copy of `C:\Work\Gifs+\repo`, meant for GitHub `thatkerimguy/KerimsPluginRepo-Experimental` (Pages: `https://thatkerimguy.github.io/KerimsPluginRepo-Experimental/index.json`). Try changes there first; copy them to `repo` once they work.
+- The two folders hold the **same files**. `valenced-repo.yml` switches to experimental mode by itself when the repository name ends in `-Experimental`: each push publishes `<manifest version>.<run number>` (no manifest bump needed; the CLI accepts 4-part versions), as id `thatkerimguy.gif-picker-optimizer-experimental` / name "GIFs+ Experimental" (the workflow rewrites the manifest and `PLUGIN_ID` in a build copy, and fails if the old id is left), keeps the newest 5 builds, renames the repo config and points the landing page at the experimental repo. `BASE_URL` comes from the repository name in both modes. Checked by running the build, index and landing page steps locally (jq replaced by a stand-in).
+- Desktop has no install URL: copy `experimental\vencord\gifPickerOptimizer` into Vencord's `src\userplugins` instead of the `repo` one (same plugin name and settings, so never both).
+- Syncing: copy changed files across (both directions). Don't hand-edit names or ids per folder; the workflow handles that.
+
+## File layout
+
+Shared (both builds, kept in sync by the script):
+- `tuning.ts`: every timing and size the loading and caching code is tuned with (retry delays, fast lane thresholds, overtime, low-res wait and reuse, lookup limits, save delay, saved list sizes and ages). Change numbers there.
+- `queue.ts`: `LoadQueue` (a `TicketHeap`: visible first, then `seenBefore`, then index). `finish(t, loadMs)` / `release(t)` (load timeout: the slot goes to the next GIF, the download continues as overtime, capped at another `concurrency`), the cache fast lane (`fastLaneOpen`: while seen-before loads take ≤ 150 ms, up to 8 more of them may start; one ≥ 400 ms or a timeout closes it), `hold()` for tickets marked `waitsForLowRes` (Klipy search results) only.
+- `tileLoader.ts`: `useTileLoader(react, env, opts)`, a tile's whole load lifecycle: phases `queued` → `lookingUp` (Klipy favourite lookup, no queue slot) → `loading` → `done`, cache / seen-before shortcuts, still toggle, `enabled`, timeouts, retries (`retryDelay`), mobile's native cache probe and stall fallback (`useStallFallback`). It takes React's hooks as an argument (read at render time); `seenBefore` is known before the first render, so those tiles never flash the queued dot.
+- `tracking.ts`: `createTracking(...)`: the queue, `loadedThisSession`, saved `seen` / `failed`, `apiPreviews`, `isLoadedThisSession` / `isSeenBefore` / `markLoaded` / `forgetLoaded` / `drop` / `isDropped`, the `tileEnv` for the loader and `flushSaved`. Each `state.ts` calls it and re-exports the result.
+- `persist.ts`: `Persisted<T>`, the load / merge / batched save / `reset` / `close` helper behind `SavedUrlSet`, `KlipyResolver` and mobile `TenorPageResolver`. Never saves before the saved copy was read (a save replaces it). Saves are batched 15 s; `flushSaved()` saves at once when Discord closes or is hidden (desktop `beforeunload` / `visibilitychange`) or the app leaves the foreground (mobile `AppState`).
+- `saved.ts`: `SavedUrlSet`, a URL LRU with expiring timestamps (`seen`, `failed`). `cache.ts`: `LruCache`, `LoadedCache`. `async.ts`: `Limiter` (n at a time, with spacing), `wait`.
+- `items.ts`: `GifItem` (Discord's picker item), `isFavoriteItem`, `isFavoritesTile`.
+- `lowres.ts`: URL rewrites (`rewriteUrl`, `stillUrl`, media proxy helpers), Klipy/Tenor URL helpers.
+- `klipyLookups.ts`: `KlipyResolver` (favourite lookups), `klipyFavoriteFormats`. `lowResPages.ts`: `ApiPreviewCache`, `LowResPrefetcher` and `LowResPages` (search / trending low-res request alongside Discord's, `arrived` on `GIF_PICKER_QUERY_SUCCESS`; each build passes adapters in `createLowResPages`).
+- `favoritesBackend.ts`: `createFavoritesBackend` (Discord's frecency favourites), sizes (`protoBytes`, `estimateBytes`, `FAVORITES_MAX_BYTES`). `transfer.ts`: export/import (`parseExport` validates and lists other sites, `otherSitesWarning`, `applyImport`, `importFavorites`, `importSummary`).
+- `diagnostics.ts`: which patches are seen working (`expectPatch` / `patchWorks` / `patchFailed`, `summarizePatches`, `PATCHES_NOTE`), shown in settings as "Patches".
+- `settingsText.ts`: every word in both settings screens (`SECTIONS`, `TEXT`, `QUALITY_CHOICES` with rough pixel widths, `RESTORE_DEFAULTS_CONFIRM`) and the cache figures (`CacheNumbers` → `cacheStatRows` / `cacheSummary`), so desktop and mobile read the same. Change wording there, not in the builds.
+
+Vencord (`vencord/gifPickerOptimizer/`):
+- `index.tsx`: `definePlugin`, flux handler, start/stop (queue settings, connection listener, flush on close / hidden, expected patches). `patches.ts`: the webpack patches as plain data (tested against Discord's code).
+- `settings.tsx`: settings in sections (Previews, Loading, GIF picker, Favourites, Status and cache; the headings are value-less component settings from `SettingsHeader.tsx`), each with a `displayName` and wording from `settingsText.ts`; Preview size and GIFs at the same time have description getters that say what Auto is using right now; GIFs at the same time, On-screen GIFs first and Skip slow GIFs after are `hidden` while Load one by one is off. Also `quality()`, `applyQueueSettings` (on start, setting change, connection change), `loadConcurrency`. `CacheSettings.tsx`: `PatchesSettings` and `CacheSettings` (one-line summary, details in an `ExpandableSection`; the cache one also has the reset button). `RestoreDefaults` (in settings.tsx, to avoid an import cycle) puts every option back to its `default` after a confirmation.
+- `state.ts`: `createTracking(...)` exports, `runtime` (`KlipyResolver`, `LowResPages` while running), DataStore keys. `preconnect.ts`: `<link rel=preconnect>` to a GIF host when a tile queues (the loader's `warmUp`), at most every 10 s per host.
+- `previews.ts`: `pickSrc`, `pickStill`, `createLowResPages`, `lowResStarted`, Klipy favourite lookups.
+- `GifTile.tsx`: the tile (shared loader). `components.tsx`: `Indicator`, `LoadOverlay` (probe image only while loading; a tile shown from cache listens for its own `<img>` error), `StillTile`. `stillFrames.ts`: frame capture and its LRU. `viewport.ts`: `ViewportWatcher` / `useViewport` (on-screen state for queue priority).
+- `favoritesOnly.ts`: helpers called from patches. `favorites.ts`: `favoritesBackend`, `favoriteItems()`. `FavoritesSettings.tsx` (export to a file, import with one confirmation for replace and other sites), `types.ts` (tile props).
+
+Valenced (`valenced/gif-picker-optimizer/js/`):
+- `index.tsx`: `plugin({...})` and the start wiring (`runtime.*`, saved lists, expected patches, `AppState` flush). `patches.tsx`: every patch and module lookup (`applyPatches(cleanup)`).
+- `settingsStore.ts`: settings storage, hooks, `cacheControl` (cache figures and reset while running). `settings.tsx`: settings page in groups (Previews, Loading, GIF picker, Favourites, Status and cache, then Restore default settings with a confirmation), wording from `settingsText.ts`; multi-value settings are one row with the current value that lists the values under it when tapped (`choiceRows`, one open at a time, plain rows so the group draws them); Patches and Cache show a summary row that expands. `cacheStats.ts`: `cacheNumbers`, `resetCaches`.
+- `state.ts`: `createTracking(...)` exports, `runtime`, `applyQueueSettings`. `nativeCache.ts`: `isNativeCached` (batched `Image.queryCache`). `tenor.ts`: `TenorPageResolver` (fallback only). `previews.ts`: `pickSrc`, `lookupFor`, `createLowResPages`, Tenor media from the saved src.
+- `viewport.tsx`: `ViewportStore`, `OptimizedResultsList` (also applies queue settings), `useVisibleIndex`. `tile.tsx`: `GifTile` (shared loader; `enabled` = Discord's tree has the Image, found once with `findInTree`, swapped with `replaceAt`). `indicator.tsx`: the animated `Indicator` (shared loops, `useTransition`). `tree.ts`: typed tree helpers. `picker.tsx`: deferred picker and the categories page switch.
+- `modules.ts`: `pickerModules`. `favorites.ts`: `favoritesBackend`. `alerts.tsx` (toast, confirm alert), `mainPage.tsx`, `favoritesSettings.tsx` (export to clipboard/share, import from clipboard).
+
+Repo: `tests/` (Node tests, TESTING.md), `.github/scripts/` (`sync-shared.mjs`, `setup-valenced-template.sh`, `preinit-check.cjs`), `.github/workflows/` (`checks.yml`, `valenced-repo.yml`).
 
 ## What the user asked for
 
@@ -13,7 +53,7 @@ GifPickerOptimizer: a Discord GIF picker plugin with two builds.
 2. Show a loading or progress indicator on tiles that haven't loaded.
 3. Show low-resolution previews in the picker: XS/S/SD on Klipy and Tenor, and smaller versions of vx/fx/twitter and Discord links. The full-resolution GIF must still be what gets sent to chat.
 4. Port the mobile build from Raincord to Valenced.
-5. Unload GIFs that are off screen and load the ones on screen, with caching, so big favourite libraries perform well on mobile and desktop.
+5. Big favourite libraries should perform well on mobile and desktop: on-screen GIFs first, with caching. (Off-screen unloading was built, then removed: Discord's lists already unmount tiles that scroll away.)
 6. Optional (off by default): still image previews in the favourites tab instead of playing GIFs.
 
 ## The user's setup
@@ -23,7 +63,7 @@ GifPickerOptimizer: a Discord GIF picker plugin with two builds.
 - Copy only `vencord\gifPickerOptimizer`, never the whole repo. Vencord treats every folder in `userplugins` as a plugin.
 - To re-copy after changes: `xcopy /E /I /Y ..\bettergifs\vencord\gifPickerOptimizer src\userplugins\gifPickerOptimizer`, then rebuild and restart Discord. For quicker iteration, `pnpm dev` (watch mode) followed by Ctrl+R in Discord also works.
 
-## How the Vencord plugin works (`vencord/gifPickerOptimizer/index.tsx`)
+## How the Vencord plugin works (`vencord/gifPickerOptimizer/`)
 
 ### Rule: never touch the data, only what's displayed
 
@@ -32,7 +72,7 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 ### The webpack patch
 
 - Find string: `"renderEmptyFavorite"`. That module holds the GIF picker results list (class `W`) and the tile component (class `H`, exported as `uG`). Inside `renderItem`, Discord does `(0,r.jsx)(H,{item:u,index:t,format:u.format,src:u.src,coords:s,onClick:…,renderExtras:…,imagePool,videoPool,…})`.
-- The patch replaces `H` with `$self.SequentialResult` and passes `Result:H` and `resultType:this?.props?.resultType` (the list's `resultType`, used to detect the favourites tab).
+- The patch replaces `H` with `$self.GifTile` and passes `Result:H` and `resultType:this?.props?.resultType` (the list's `resultType`, used to detect the favourites tab).
 - Match: `/(\(0,\i\.jsx\)\()(\i),\{(?=item:(\i),index:\i,format:\3\.format,src:\3\.src)/`. This was checked against the datamined code.
 - Reference copy of Discord's code: github.com/Wumpus-Central/discrapper-canary, `chunks/884037.js` (the picker) and `chunks/821102.js` (GIFPickerViewStore). Chunk IDs change between Discord builds, so search by string instead of chunk ID.
 - How tile `H` loads:
@@ -40,29 +80,28 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
   - Videos: in `componentDidMount`, a pooled `<video>` (`preload=auto`, autoplay) is added to the tile.
   - In both cases `H` reads `src` from props.
 
-### `SequentialResult` phases
+### `GifTile` phases
 
 1. **queued**: renders its own placeholder `div` (`.vc-gpo-tile`, `style={coords}`) instead of `H`, so nothing downloads yet. Clicking the placeholder calls `onClick(item)`, so it still sends.
 2. **loading**: when the queue says go, it picks the preview URL with `pickSrc` and renders `H` with `src=preview` and `key=preview`. `renderExtras` is wrapped to add `LoadOverlay` inside H's root element.
-   - `LoadOverlay` attaches capture-phase listeners (`progress`, `canplaythrough`, `error`) to the parent element for videos. Progress is `buffered / duration`.
+   - `LoadOverlay` attaches capture-phase listeners (`progress`, `canplay`, `error`) to the parent element for videos. Progress is `buffered / duration`. A video counts as done on `canplay` (or `readyState >= 3`), like Discord's tile `H`, which shows its video in `handleCanPlay` (`oncanplay`). Until 1.6.0 it waited for `canplaythrough`, which comes later and held the queue slot longer. `StillTile` uses `loadeddata`, which is earlier still.
    - For images it loads the same URL in a probe `Image()`. The browser shares the request, so it doesn't download twice.
 3. **done**: `H` is rendered as normal.
 
-**Off-screen unloading (`unloadOffscreen`, `offscreenMargin`):**
-- Two `ViewportWatcher`s: "visible" (50px, feeds queue priority) and "near" (`offscreenMargin` px). Their IntersectionObservers are rooted on the picker's scroll container (`findScroller`), because rooted on the window `rootMargin` does nothing: the scroller clips the tiles first. (The old 100px window margin had no effect for that reason.)
-- The watched element is the placeholder, the still tile, or `.vc-gpo-sentinel`, an `inset:0` div rendered through `renderExtras` inside H.
-- Not near → "parked": a plain placeholder is rendered instead of H, so H unmounts and returns its pooled `<video>`. A queued/loading ticket is cancelled, so off-screen GIFs never download.
-- Back near → if the URL is in `loaded` (an LRU, `cacheSize`), it shows at once without queueing; the browser HTTP cache serves it.
+**No off-screen unloading (removed after 1.6.0 testing):**
+- Checked in real Discord (2026-11-17, by the user): tiles leave the DOM when you scroll away, with the plugin's unloading off. Discord's results list (`W` in the `renderEmptyFavorite` module) is a virtualized masonry list (`y.f`, `chunkSize: 128`) with pooled `<img>`/`<video>` elements, so the plugin's own parking (`unloadOffscreen`, `offscreenMargin` 800 px, a second "near" watcher) added little and was removed. Old saved values are ignored.
+- When Discord unmounts a tile, its ticket is dropped on unmount, so off-screen GIFs that haven't started don't download. When the tile comes back, a URL in `loadedThisSession` shows at once from the HTTP cache.
+- One `ViewportWatcher` remains: "visible" (50 px, feeds queue priority), rooted on the picker's scroll container (`findScroller`), because rooted on the window `rootMargin` does nothing. The watched element is the placeholder, the still tile, or `.vc-gpo-sentinel`, an `inset:0` div rendered through `renderExtras` inside H.
 
 **Still favourites (`stillFavorites`):**
 - Favourites are detected by `resultType` matching /favou?rite/ or, as a fallback, items with a numeric `order` and no `id` (frecency favourites have that shape on desktop and mobile).
 - `stillUrl()` in `lowres.ts` gives a still rendition when the source has one: Tenor PNG posters (`Ag`/`AN`/`Ae`/`AD`, checked against the Tenor API), Giphy `_s` renditions, `video.twimg.com/tweet_video` → `pbs.twimg.com/tweet_video_thumb`, and Discord's media proxy without `animated=true` (`format=jpeg` for videos).
 - Otherwise (Klipy, etc.) `StillTile` loads the preview, captures the first frame with `createImageBitmap` (falling back to a canvas copy), draws it with object-fit cover, and releases the element. Frames are kept in an LRU (`frames`, 300).
 - Still tiles are the plugin's own div (like the placeholder), not H. Clicks and the context menu still go to Discord's handlers with the original item.
-- Fallback chain on error: still URL → low-res preview (frame captured) → original.
+- Fallback chain on error: still URL (retried) → low-res preview (frame captured, retried). Never the original.
 
 **Errors and timeouts:**
-- If the preview fails, the tile switches to the original `src`.
+- A preview that fails is retried after 1, 3 and 9 s (one quick retry when it failed for good before: `failedBefore`, from the saved `failed` list; a load that works removes it from that list) (`RETRY_DELAYS_MS` in tuning.ts; the queue slot is freed meanwhile, and `attempt` goes into the element key so the same URL loads again). Then a still image falls back to the animated preview; anything else gives up (`gaveUp`: a still, hollow ring) and tries again when the tile comes back. The full size original is never loaded instead (the user's call, 2026-11-17). The saved `failed` list only steers stills to the preview now; `pickSrc` ignores it.
 - After `loadTimeout` seconds, the queue slot is freed while the GIF keeps loading.
 - If the component throws, the ErrorBoundary fallback renders the original tile.
 
@@ -71,13 +110,19 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 - Ordering:
   - Tiles on screen come first (an IntersectionObserver feeds this).
   - Then item **index**: the masonry layout places items in index order, so index is the true reading order. Pixel tops in a masonry grid are staggered and give the wrong order.
-- `block()` holds the queue while the Klipy low-res lookup is in flight (3-second cap), so full-size files don't start downloading in the meantime.
+- Then `seenBefore` tickets (GIFs in `seen`, loaded in an earlier session) before the others with the same visibility, then index. Only `isLoadedThisSession` skips the queue: a seen URL may have been evicted by Chromium or Fresco since, and trusting it made them all download at once (that happened with precaching, removed on 2026-11-17).
+- `hold()` keeps Klipy search tiles (`waitsForLowRes`) waiting while the small versions of their results page are in flight (3-second cap), so they don't start the full-size files meanwhile. Other tiles (Tenor, Discord links, favourites) carry on. With the early request (below) it only holds for whatever is still in flight when Discord's results arrive, and only for what's left of 3 s since the request started.
+- Load timeout: the slot goes to the next GIF (`release`) and the slow one keeps downloading as overtime. Overtime plus active downloads are capped at 2 × `concurrency` (overtime entries stop counting after 60 s).
+- Cache fast lane: `finish(ticket, loadMs)` reports load times. While seen-before (`seenBefore`) GIFs load in ≤ 150 ms (they come from the cache), up to 8 of them may run past the limit. One taking ≥ 400 ms, or timing out, closes the lane: the cache had dropped it, so it really downloaded (the problem precaching had).
+- Concurrency (desktop): a dropdown (Auto, 1–6; a slider's "Auto" marker label wrapped), 0 = **Auto** (default for new installs): `navigator.connection` → 2 on `slow-2g`/`2g`/`3g` or `saveData`, 6 on `4g` with `downlink >= 5`, 4 with `downlink >= 2`, else 3 (also when the API is missing). `loadConcurrency()` in `settings.tsx`. Vencord writes a default into settings the first time it's read, so existing installs keep their stored 3. Mobile has no such API: 3 by default.
 
 ### Low-res sources
 
-**Klipy** (`lookupLowRes`):
+**Klipy** (`LowResPages`, `LowResPrefetcher` in lowResPages.ts):
 - Klipy gives every size a random file name, so the URL can't be rewritten.
-- On `GIF_PICKER_QUERY_SUCCESS` (a flux handler), the plugin calls `RestAPI.get` on `/gifs/search` (or `/gifs/trending-gifs` when there's no query).
+- Discord's search (`y` in the desktop actions chunk, find `"GIF_PICKER_QUERY_SUCCESS",query:`; mobile `doSearchRequest` in `actions/GIFPickerActionCreators.tsx`) is one request, debounced 250 ms, `{q, media_format: getSelectedFormat(), locale, limit}`; no paging. Trending is `Z4` / `fetchTrendingGIFs(limit)` on `/gifs/trending-gifs`.
+- The plugin's request starts at the same time as Discord's: desktop patches `y` and `Z4` to call `$self.lowResStarted(query, limit)` right before `o.Bo.get({url:…GIFS_SEARCH…` / `…GIFS_TRENDING_GIFS…` (regexes tested against an esbuild-minified copy of `c497685.js` in the scratch `re/` folder). Mobile wraps the exported `search(query, type, immediate, limit)` (with its own 250 ms debounce unless `immediate`, mirroring Discord's; an empty query doesn't cancel it, like Discord) and `fetchTrendingGIFs(limit)` with `instead`. Requests are keyed by query + format; one that worked is reused for 5 minutes.
+- On `GIF_PICKER_QUERY_SUCCESS` (a flux handler), `LowResPages.arrived` asks the prefetcher for that query. In flight → the queue is blocked until it settles (3 s cap from its start). Done → nothing. None started or it failed (patch didn't apply, settings changed) → the old way: a GET on `/gifs/search` (or `/gifs/trending-gifs` when there's no query) now, with the queue blocked.
 - The request uses the same q, locale and limit, with `media_format` set to `tinywebm` (S) or `nanowebm` (XS). Linux desktop uses `tinywebp` by default, so XS there becomes `nanowebp`.
 - Results are mapped back to tiles by `id` or `url`.
 - SD for Klipy keeps Discord's default size.
@@ -93,100 +138,29 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 
 A preview is only used if it's the same media type as the original (video stays video, image stays image), because H renders based on `format`.
 
-## Verified vs unverified
+## Rules (each one came from a bug; details in CHANGELOG.md)
 
-**Fixed on 2026-11-16 (1.5.1, third review):**
-- Mobile `TenorPageResolver`: a non-OK HEAD response (429, 5xx) counts as a failed lookup (retried after 5 minutes) instead of being saved as "no small version" for good.
-- `KlipyResolver`: only HTTP 4xx rejections (not 408/429) count toward skipping a media_format (`isRejection`). Timeouts and network errors no longer disable a format for the session.
-- Mobile stall fallback: a preview that still reports progress keeps loading; it only falls back after `loadTimeout` seconds without progress (and at least 2 × `loadTimeout` in total).
-- Mobile `useSettings` always calls the same hook: it subscribes to the last storage (`hookStorage`), which is kept after the plugin stops.
-- Desktop still tiles: a frame that was evicted (closed) before it was drawn is captured again instead of leaving a blank tile with a spinner.
-- `LoadQueue` keeps waiting tickets in a binary heap (rebuilt on `kick()`, cancelled ones skipped): draining 5000 tickets went from 99 ms to 7 ms. Order changes must call `kick()`.
-- Desktop settings: the Cache section is now last.
-- CI: `.github/workflows/shared-files.yml` and a step in the publish workflow fail when the four shared files differ between the builds.
-- Tests now run with Node (`node --experimental-transform-types`), since Bun isn't on PATH; klipy.ts imports need `.ts` extensions added for that (see the scratch `t/n` copy).
+- **Never touch the data, only what's displayed.** Item objects and favourites are never changed; only the URL a tile shows (see below).
+- **Shared files:** edit them in `vencord/gifPickerOptimizer/`, then run `node .github/scripts/sync-shared.mjs` (it holds the list; CI runs it with `--check`).
+- **No hardcoded colours:** everything follows the theme (desktop CSS variables such as `--text-muted`, `--background-mod-subtle`, `--control-primary-background-default`; mobile `Tokens`). Not `--brand-500` or `--control-overlay-*` (fixed colours, invisible on light themes).
+- **Desktop: never copy an `@webpack/common` value at module level** (`const hooks = { useState, ... }`). They're `export let` bindings filled in by `waitFor` once Discord's modules load, after plugins are evaluated, so the copy holds `undefined` and every tile falls back to Discord's own. Read them at render / call time. `tests/unit/vencord-module-level.test.ts` checks it.
+- **Mobile: nothing from `@valenced/discord/*`, `react` or `react-native` may run at module level** (only inside functions, or through `lazy`). Valenced evaluates the script at pre-init, before those exist, and turns the plugin off after a throw until it's reinstalled. `@valenced/json-storage` and `@valenced/patcher` are fine. Every `.tsx` starts with the classic JSX pragma (`lazy.ts` explains). `preinit-check.cjs` checks a build.
+- **Mobile: never write `<React Native export>.<React Native name>`** (`Animated.View`): the build rewrites React Native names even after a dot. Use `Animated.createAnimatedComponent(View)`. `preinit-check.cjs` fails such a bundle.
+- **Mobile: never use a React or React Native import as a shorthand object key** (`{ useState, useEffect }`): the build rewrites it there too and the bundle doesn't parse. Pass the `React` namespace instead (tile.tsx).
+- **Mobile: never remove a native-driven animated style from a view that stays mounted** (React Native leaves the view at the last native value). Shared native loops reset their value to 0 when they restart.
+- **Mobile: the flux patch must return the payload**, or the event is blocked.
+- **Imports are untrusted:** `parseExport` only takes https entries, and any site outside the known GIF hosts is shown to the user before importing (`otherSitesWarning`).
 
-**Changed on 2026-11-16 (1.5.0, second review + cache reset; repo renamed):**
-- The GitHub repo is now `thatkerimguy/KerimsPluginRepo`; the Valenced repository URL is `https://thatkerimguy.github.io/KerimsPluginRepo/index.json` (the old BetterGIFS Pages URL stops working; users re-add the new one).
-- Klipy favourite lookups (`klipyFormats`) only run for favourites (`isFavoriteItem`). Search/trending results get previews from `lookupLowRes` only; before, at S/SD on mobile every Klipy result did its own `/gifs/search`.
-- `KlipyResolver` skips a media_format for the session after 2 failed searches in a row if it never worked (`usable()`), in both `resolve` and `peek`.
-- Saves wait for the saved cache to load (`loadDone`): Klipy and mobile Tenor saves replace the whole file, so saving earlier could drop saved entries.
-- A preview shown from the `loaded` cache that fails now falls back like a fresh load: mobile handles `onError` in phase `done`; desktop keeps `LoadOverlay` mounted (quietly) for previews in phase `done`.
-- Desktop `offscreenMargin` has `onChange: () => nearWatcher.refresh()`, which re-observes mounted tiles with the new margin.
-- Mobile favourites-only hint is a plain "Search for GIFs above." (no favourites hook).
-- Cache settings: `LruCache.approxBytes()` (strings + 200 B per entry, from the Bun measurements), `KlipyResolver.stats()/clear()` (clear also saves `{}` and ignores a load still in flight via `generation`), mobile `TenorPageResolver.stats()/clear()`. Mobile settings read them through `cacheControl` in `shared.ts`; Vencord has an `OptionType.COMPONENT` setting (`CacheSettings`) refreshed every 2 s. Reset doesn't touch Discord's own image cache.
+## Tests and verification
 
-**Fixed on 2026-11-16 (1.4.1, code review findings):**
-- Desktop `ViewportWatcher` leaked an IntersectionObserver pair per picker open (each holding the closed picker's DOM through its root). Observers are now reference counted and disconnected with their last element.
-- Desktop Klipy lookups race `loadTimeout` like mobile, so a long serial lookup chain can't keep tiles spinning.
-- `KlipyResolver.search` replaces a saved miss ("") when a later search returns that GIF.
-- Desktop favourites only: `componentDidMount` is patched to `$self.mountCategories(trendingCategories, fetch)`, which keeps Discord's fetch action. If the option is turned off while the picker is open, `needsCategories` starts the fetch (outside render) instead of showing the skeleton forever.
-- A ticket `start()` that throws now falls back to loading the original instead of leaving the tile queued forever (both builds).
-- Mobile `TenorPageResolver` remembers failed lookups (network error, timeout) for 5 minutes in memory, so remounting tiles don't fire a HEAD request each time.
-- `loaded` is resized when the setting changes (Vencord `onChange`; mobile: an effect in `OptimizedResultsList`), not in every tile render.
-- Mobile favourites-only hint only suggests starring GIFs when there are no favourites (a picker with `hideFavorites` has none to show).
-
-**Changed on 2026-11-16 (1.4.0, favourites only keeps the main page + smaller caches):**
-- `favoritesOnly` no longer replaces the main page with the favourites list (the user wants the normal main page, with search and the Favorites category, minus the featured categories).
-  - Desktop: three replacements in the `"hideFavoritesTile:"` module's categories component `k`: `componentDidMount` only fetches trending when `$self.needsCategories(...)`, `getData` uses `$self.featured(trendingCategories)` (a stable empty array when on), and `renderContent` shows the loading skeleton only when `needsCategories`. The old `frontPage` patch is gone. Regexes were tested against a hand-minified copy of the chunk.
-  - Mobile: the `GIFPickerCategoriesPage` patch renders one row with Discord's `GIFPickerCategoryView` for `props.favoritesCategory` (same row height and gutter as Discord's page) and empty spacers, or a hint text when there's no favourites category. Discord's page would pad to 20 rows of grey skeletons with only one category, so it isn't reused.
-- Memory, measured in Bun with full caches: `loaded` 0.26 MB (1000), `failed` 0.11 MB, `apiPreviews` 2.1 MB → 0.5 MB (now an LRU of 1200 instead of a Map cleared at 3000), Tenor pages 2.5 MB for 5000 favourites (only grows with favourites, unchanged), Klipy: unrelated search results go to an unsaved LRU of 500 and move to the saved cache only when a favourite uses one (40 lookups saved 2040 entries before, 40 now).
-- Desktop still frames were the big one: up to 300 full-size bitmaps (about 40 to 200 MB). `LruCache` now takes an optional `weigh`; frames are captured with `createImageBitmap` resize to cover the tile in device pixels and limited to 24 MB. Evicted canvases are zero-sized to free them.
-- `LoadedCache` values are timestamps (numbers) instead of objects. `LruCache.set` on an existing key now calls `onEvict` for the replaced value.
-
-**Added on 2026-11-16 (1.3.0, favourites only + faster GIF tab switch):**
-- Desktop `favoritesOnly`: the picker parent (find `"hideFavoritesTile:"`, discrapper `chunks/649529.js`) renders the categories grid `L` when `this.state.resultType` is null, else the results list with favourites data when it's `FAVORITES`. The patch swaps `this.state` in `renderContent` for `$self.frontPage(this.state, hideFavorites, FAVORITES)`. The header still reads the real state, so it keeps the search bar and no back arrow. Typing sets `SEARCH` as before. The regex was checked against a minified copy of the code, not in real Discord.
-- Mobile `favoritesOnly`: patches `type` of the memo `GIFPickerCategoriesPage` default and renders `GIFPickerResultsList` with `useFavoriteGIFsMobile().favorites`, the picker's `onPressGIF` (taken from a context provided by the GIFPicker patch) and a `columnWidth` measured with `onLayout`. Falls back to Discord's page when the picker has `hideFavorites`.
-- Mobile `fastTabSwitch`: patches `type` of the memo `GIFPicker` default. The first render is an empty frame with a spinner, and the picker mounts after `requestAnimationFrame` or `InteractionManager.runAfterInteractions` (capped at 300 ms). Picker and categories page render as their own components (`PickerInner`, `CategoriesPageInner`) so the hook order never changes.
-- Why the switch is slow on mobile: on mount, GIFPicker dispatches `initializeSearch`/`resetSearch`, fetches trending search terms, and the categories page fetches trending categories and renders up to 20 rows of animated category GIFs. Not profiled on a device: the deferral helps if the picker mount is the slow part. If the emoji picker's unmount is the slow part, it won't.
-
-**Fixed on 2026-11-16 (1.2.2, favourites stuck loading on mobile):**
-- Discord mobile's `transformFavoriteGifUrl` (`modules/gif_picker/native/GIFPickerUtils.tsx`) rewrites favourites before the picker shows them: proxied (images-ext) ones get `animated=true` (the proxy turns mp4 into animated webp), and Tenor favourites become `<tenor page URL>.gif`, which 302-redirects to `media1.tenor.com/m/<id>AAAAC/<name>.gif`.
-- 1.2.0 unwrapped proxied Tenor mp4s into direct Tenor **mp4** URLs. The mobile tile is an image component, can't show mp4, and apparently never fires onLoad/onError, so tiles spun forever.
-- Mobile now calls `rewriteUrl(..., { imagesOnly: true })` (Tenor/Giphy give animated webp; proxied unknown videos get resized `format=webp&animated=true` through images-ext) and rejects any video preview URL.
-- `TenorPageResolver` (mobile only, `index.tsx`) follows the page URL redirect once with `fetch(HEAD)` and saves page → media in `tenor-pages.json`.
-- Klipy lookups on mobile always ask for image formats.
-- Safety nets: lookups (`resolving`) can't hold a tile longer than `loadTimeout`; `KlipyResolver` waits at most 2 s for its saved cache and 8 s per search; a mobile preview still loading after 2 × `loadTimeout` falls back to the next option (`error()`).
-- Unverified on a device: that RN `fetch` HEAD exposes the redirected `res.url`, and that images-ext resizes proxied videos into animated webp.
-
-**Fixed and verified on 2026-11-16 (1.2.0, low-res for favourites):**
-- The queue effect's cleanup used to cancel a ticket as soon as it started loading (its deps include `phase`), so loading wasn't strictly sequential. Now only unstarted tickets are cancelled there; started ones are freed by finishing, parking (`drop`) or unmounting.
-- Unit tests (Bun) for proxy unwrapping, the Tenor codes and `KlipyResolver` (format fallback, caching of other results, misses, persistence) pass. Tenor URLs generated for the user's reported GIFs were fetched live: all 200; the webps are animated.
-
-**Verified on 2026-11-16 (Valenced port + unloading + still favourites):**
-- Valenced build: `tsc -b` passes (and catches a planted error), `valenced-plugin build` produces `build/js/index.js`. Biome only reports style (tabs vs spaces, import type).
-- Vencord build: `pnpm build` passes, `tsc --noEmit` on all of Vencord has 0 errors, oxlint only reports the license header rule that applies to built-in plugins.
-- Unit tests (Bun) for `rewriteUrl`, `stillUrl` and the LRU caches pass. Generated Tenor still/preview URLs return 200 live.
-- **Not run in real Discord or on a device.** Check: tiles unload and come back when scrolling a big favourites list; the sentinel sits inside H (if tiles never unload, H's root isn't positioned and the sentinel covers the whole list, which is the safe failure); still favourites show; clicking a still/parked tile sends the original.
-
-**Verified in the earlier cloud session:**
-- Both builds typecheck. The full Vencord build passed; the rain build and eslint passed.
-- jsdom test with a replica of Discord's `H` tile:
-  - strictly one download at a time, in index order;
-  - previews shown, and the original item sent, including when clicking a queued tile;
-  - Klipy tiles waited for the lookup;
-  - a 404 preview fell back to the original.
-- A react-test-renderer test of the mobile build passed the equivalent checks.
-
-**Not yet verified in real Discord. Check these first:**
-1. **Does the patch apply?** If not, the console shows a Vencord warning about the `renderEmptyFavorite` patch. Use Vencord's patch helper or the devtools search to find the current `renderItem` code and update the regex.
-2. **Does Discord's API accept `media_format=tinywebm` / `nanowebm`?**
-   - Check the DevTools Network tab for the second `/gifs/search` request.
-   - If it fails, the console shows a warning starting with `[GifPickerOptimizer] Couldn't fetch low resolution Klipy previews`.
-   - Discord's own code lists these names (they date from the Tenor era), but whether the server still accepts them is unconfirmed.
-   - Fallback idea: try other format names, or use `preview`/`gif_src` from the response.
-3. **Tenor size codes.** They come from the Endcord/BetterGifLoad plugin's reverse-engineering. A wrong code 404s and then falls back to the original.
-4. **The tile's root must be positioned.** `.vc-gpo-overlay` uses `position:absolute; inset:0` inside H's root. If the indicator shows up in the wrong place, check whether `coords` includes `position:absolute`.
-5. **Progress:**
-   - Video tiles should show a %.
-   - Image tiles (webp, or Linux desktop) only get a spinner, because images can't report progress.
-   - Discord's CSP probably blocks the `fetch()` streaming approach that would give image progress, so it wasn't attempted.
-6. **Favourites:** sending a favourite must post the original URL, and adding a favourite must store the full-resolution `src`.
+- `tests/` (Node 22.18+): `npm ci`, then `npm test` (unit tests for the shared files, the tile loader with React, the desktop module-level check) and `npm run test:patches` (the Vencord patches against Discord's current datamined code). See TESTING.md.
+- CI (`.github/workflows/checks.yml`): shared files in sync, unit tests, Discord patches (also weekly), Vencord type check against Vencord's latest source, Valenced build + type check + pre-init check with the pinned toolchain (`.github/scripts/setup-valenced-template.sh`).
+- Not covered by anything automatic: how it behaves in real Discord and on a device. TESTING.md has the smoke checklist to run on each experimental build; record results in CHANGELOG.md.
 
 ## Known limitations
 
-- **Klipy favourites** (fixed in 1.2.0): Discord's add-favourite code (desktop chunk with `"favoriteGifs"` + `GIF_FAVORITED`) stores `gifSrc` (the full .gif) instead of the mp4, and proxies it through images-ext when the src is a Discord media URL. `klipy.ts` `KlipyResolver` searches `/gifs/search` for the slug of the favourite's `url` (`klipy.com/gifs/<slug>`) with `media_format` `nanowebp`/`tinywebp` (images) or the selected video family, matches by page URL, caches every result (also misses) in an LRU of 5000, and persists it (desktop: `DataStore` key `GifPickerOptimizer_klipyPreviews`; mobile: `klipy-previews.json` in the plugin's storage). Lookups run one at a time, 300 ms apart. Tiles show a spinner in the `resolving` phase meanwhile. **Unverified:** whether Discord's API accepts `nanowebp`/`tinywebp` on desktop and whether search finds the exact GIF for every slug. A miss just shows the original.
-- **Proxied favourites** (fixed in 1.2.0): `unwrapProxyUrl` turns `images-ext-N.discordapp.net/external/<sig>/https/<host>/<path>` back into the source URL for Tenor, Giphy, Klipy and twimg hosts.
+- **Klipy favourites**: Discord's add-favourite code (desktop chunk with `"favoriteGifs"` + `GIF_FAVORITED`) stores `gifSrc` (the full .gif) instead of the mp4, and proxies it through images-ext when the src is a Discord media URL. `klipyLookups.ts` `KlipyResolver` searches `/gifs/search` for the slug of the favourite's `url` (`klipy.com/gifs/<slug>`) with `media_format` `nanowebp`/`tinywebp` (images) or the selected video family, matches by page URL, caches every result (also misses) in an LRU of 5000, and persists it (desktop: `DataStore` key `GifPickerOptimizer_klipyPreviews`; mobile: `klipy-previews.json` in the plugin's storage). Two lookups run at a time (`Limiter`), each freeing its place 300 ms after it ended. A tile waiting for its lookup (`lookingUp`, spinner) holds no queue slot and queues again once the lookup settled; a slow lookup no longer times out into loading the full size original. **Unverified:** whether Discord's API accepts `nanowebp`/`tinywebp` on desktop and whether search finds the exact GIF for every slug. A miss just shows the original.
+- **Proxied favourites**: `unwrapProxyUrl` turns `images-ext-N.discordapp.net/external/<sig>/https/<host>/<path>` back into the source URL for Tenor, Giphy, Klipy and twimg hosts.
 - **Videos without a smaller version:** Twitter `video.twimg.com` GIFs and mp4 attachments have no smaller rendition, and the media proxy can't shrink a video and keep it animated. They only get sequential loading.
 - **Desktop progress:** the percentage only appears for video tiles.
 
@@ -198,12 +172,12 @@ A preview is only used if it's the same media type as the original (video stays 
 - It always calls the original render, which uses hooks, with the original item. Then it swaps the `Image` element in the returned tree:
   - for a queued placeholder, or
   - for a clone with the preview `source` plus `onLoad`, `onError` and `onProgress`.
-- Discord mobile already uses `tinywebp`, so the default quality is XS, which requests `nanowebp`.
-- **Off-screen unloading:** `GIFPickerResultsList.tsx` renders a `MasonryFlashList` whose `viewedItemIndexes` Set only grows, so every tile ever scrolled past stays loaded. The plugin also patches that module's `default`: `OptimizedResultsList` finds the list element (has `onViewableItemsChanged` + `renderItem`), wraps `onViewableItemsChanged` with a stable callback that feeds a `ViewportStore` (first/last viewable index), and provides it through React context. `OptimizedItem` is parked when its index is more than `offscreenBuffer` items outside that range: the Image is replaced with an empty frame and queued work is cancelled. On return, a URL in `loaded` shows at once (native image cache).
+- Discord mobile already uses `tinywebp`, so the default quality is S (no extra request for Klipy). Before the 1.6.0 follow-up it was XS, which requests `nanowebp`.
+- **No off-screen unloading on mobile (removed):** `GIFPickerResultsList.tsx` renders a `MasonryFlashList` with `drawDistance = GIF_PICKER_ITEM_ESIMTATED_HEIGHT` (about 180 px) that unmounts and recycles tiles as you scroll. Its `viewedItemIndexes` only decides placeholder vs real tile for *mounted* tiles. (An earlier note here said it "only grows, so every tile stays loaded": wrong.) The plugin used to park tiles more than `offscreenBuffer` items outside the visible range, but FlashList had unmounted those already, so parking never kicked in. Kept: the patch on that module's `default` (`OptimizedResultsList`) wraps `onViewableItemsChanged` with a stable callback that feeds a `ViewportStore` (first/last viewable index) through React context, and tiles use it for the queue's visible-first order (`useVisibleIndex`). A URL in `loadedThisSession` shows at once (native image cache).
 - **Still favourites on mobile** only work for sources `stillUrl()` covers. React Native can't pause an animated image from JS, so Klipy favourites stay animated.
 - `lowres.ts` parses URLs by hand: React Native's `URL` polyfill doesn't reliably implement `searchParams.set`.
 - Mobile reference source: github.com/Wumpus-Central/discord-mobile-datamining, `discord_app/modules/gif_picker/`.
-- Build: copy the folder into the template's `plugins/`, `bun install`, `bun run build gif-picker-optimizer` (npm can't build the template's git-hosted CLI; use Bun). ZIP: `gradlew packageGifPickerOptimizer` (needs JDK 25 + Android SDK).
+- Build: `bash .github/scripts/setup-valenced-template.sh template` (pinned template, CLI and types; Git Bash or WSL on Windows), copy the plugin folder into `template/plugins/`, then `bun run build gif-picker-optimizer` in `template` (Node 22.18+ on PATH). ZIP: `gradlew packageGifPickerOptimizer` (needs JDK 25 + Android SDK).
 
 ## Settings (Vencord)
 
@@ -211,22 +185,20 @@ A preview is only used if it's the same media type as the original (video stays 
 |---|---|
 | quality (`xs`/`s`/`sd`/`original`) | `s` |
 | sequential | on |
-| concurrency | 3 (was 1 before 1.3.1) |
+| concurrency | Auto (0) for new installs; existing installs keep their stored value (was 3, 1 before 1.3.1) |
 | prioritizeVisible | on |
 | loadTimeout | 10 s |
 | showProgress | on |
 | klipyLookup | on |
-| unloadOffscreen | on |
-| offscreenMargin | 800 px (mobile: `offscreenBuffer`, 12 items) |
 | cacheSize | 1000 |
 | stillFavorites | off |
 | favoritesOnly | off |
 | fastTabSwitch (mobile only) | on |
 
-Mobile defaults are the same except quality `xs` and no `prioritizeVisible` (always on).
+Desktop quality also has `auto` (S, or SD at `devicePixelRatio >= 2`), not the default. Mobile defaults are the same except concurrency 3 (no Auto), and no `prioritizeVisible` (always on). Mobile quality is `s` (was `xs` before the 1.6.0 follow-up).
 
 ## Suggested next steps
 
-1. Install on Vencord and go through the verification list above.
+1. Run the TESTING.md smoke checklist on the next experimental build (desktop and mobile) and record the results in CHANGELOG.md.
 2. If the Klipy lookup works, compare file sizes: the Network tab's transferred size for the full vs tiny vs nano versions.
 3. Consider publishing the Vencord plugin as a standalone user plugin repo layout, with a README for other users.

@@ -9,7 +9,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>KerimsPluginRepo</title>
-    <meta name="description" content="Kerim's Discord plugins for Valenced and Vencord, with their source code.">
+    <meta name="description" content="Kerim's Plugins for Vencord and Valenced">
     <style>
         :root {
             --bg: #f6f6f8;
@@ -159,7 +159,7 @@
 <body>
     <main>
         <h1>KerimsPluginRepo</h1>
-        <p class="muted">Discord plugins for Valenced (mobile) and Vencord (desktop), with their source code.</p>
+        <p class="muted" id="tagline">Kerim's Plugins for Vencord and Valenced</p>
 
         <h2>Add to Valenced</h2>
         <div class="card">
@@ -173,8 +173,8 @@
         <h2>Plugins</h2>
         <div id="plugins">
             <div class="card">
-                <h3>GifPickerOptimizer</h3>
-                <p class="muted">Sequential loading, low resolution previews, off-screen unloading and still favourites in the GIF picker.</p>
+                <h3>GIFs+</h3>
+                <p class="muted">Various Tweaks to the Discord's Gif Picker</p>
                 <div class="row links">
                     <a class="button secondary" href="https://github.com/thatkerimguy/KerimsPluginRepo/tree/main/valenced/gif-picker-optimizer">Valenced source</a>
                     <a class="button secondary" href="https://github.com/thatkerimguy/KerimsPluginRepo/tree/main/vencord/gifPickerOptimizer">Vencord source</a>
@@ -237,13 +237,15 @@
         function pluginCard(id, p) {
             const versions = Object.keys(p.versions || {}).sort(compareVersions).reverse();
             const latest = (p.channels && p.channels.latest) || versions[0];
-            const folder = id.includes(".") ? id.slice(id.indexOf(".") + 1) : id;
+            // Experimental builds (KerimsPluginRepo-Experimental) use the same source folders
+            const stableId = id.replace(/-experimental$/, "");
+            const folder = stableId.includes(".") ? stableId.slice(stableId.indexOf(".") + 1) : stableId;
 
             const links = el("div", { class: "row links" }, [
                 el("a", { class: "button secondary", href: `${REPO}/tree/main/valenced/${folder}`, text: "Valenced source" }),
             ]);
-            if (VENCORD_FOLDERS[id]) {
-                links.append(el("a", { class: "button secondary", href: `${REPO}/tree/main/vencord/${VENCORD_FOLDERS[id]}`, text: "Vencord source" }));
+            if (VENCORD_FOLDERS[stableId]) {
+                links.append(el("a", { class: "button secondary", href: `${REPO}/tree/main/vencord/${VENCORD_FOLDERS[stableId]}`, text: "Vencord source" }));
             }
 
             const list = el("ul");
