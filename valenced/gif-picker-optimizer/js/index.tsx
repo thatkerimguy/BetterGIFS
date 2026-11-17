@@ -15,18 +15,19 @@
  * - Exports / imports favourites between accounts.
  */
 
-import { getJsonStorage, pluginStoragePathFor } from "@valenced/json-storage";
+import { getJsonStorage, JsonStorageUpdateMode, pluginStoragePathFor } from "@valenced/json-storage";
 import { AppState } from "react-native";
 
 import { cacheNumbers, resetCaches } from "./cacheStats";
 import { clearPatches, expectPatch } from "./diagnostics";
+import { createCacheInvalidation } from "./invalidation";
 import { KlipyResolver } from "./klipyLookups";
 import { applyPatches } from "./patches";
 import { createLowResPages, locale } from "./previews";
 import type { UrlListStore } from "./saved";
 import SettingsComponent from "./settings";
 import type { Settings } from "./settingsStore";
-import { cacheControl, DefaultSettings, getSettings, setStorage } from "./settingsStore";
+import { cacheControl, DefaultSettings, getSettings, setStorage, whenSettingsLoaded } from "./settingsStore";
 import { apiPreviews, applyQueueSettings, failed, flushSaved, loadedThisSession, PLUGIN_ID, runtime, seen } from "./state";
 import { TenorPageResolver } from "./tenor";
 
@@ -60,11 +61,22 @@ export default plugin<{ jsonStorage: Settings; }>({
         default: DefaultSettings,
     },
 
-    start({ cleanup, jsonStorage, logger }) {
+    start({ cleanup, jsonStorage, logger, plugin: self }) {
         setStorage(jsonStorage);
         runtime.logger = logger;
-        loadedThisSession.resize(getSettings().cacheSize);
-        applyQueueSettings(getSettings());
+        // Turned on while Discord was running: Discord's GIF modules are already loaded and
+        // in use, so the patches would only half apply. Ask for a reload and start then.
+        if (self.startedLate) {
+            self.requireReload();
+            return;
+        }
+        // The saved settings are read in the background: apply them once they're in
+        const applySettings = () => {
+            loadedThisSession.resize(getSettings().cacheSize);
+            applyQueueSettings(getSettings());
+        };
+        applySettings();
+        whenSettingsLoaded(applySettings);
         cacheControl.stats = cacheNumbers;
         cacheControl.reset = resetCaches;
         // Seen working when the code each patch calls runs (diagnostics.ts, shown in settings)
@@ -103,8 +115,35 @@ export default plugin<{ jsonStorage: Settings; }>({
             onError: e => runtime.logger?.warn?.("Klipy favourite lookup failed", e),
         });
 
+        // Clear the caches when a setting or the plugin version changes (invalidation.ts)
+        const invalidation = createCacheInvalidation({
+            reset: resetCaches,
+            onReset: reason => logger.info?.(`Cache cleared: ${reason}`),
+            onError: e => logger.error?.("Couldn't clear the cache", e),
+        });
+        invalidation.start();
+        // Compared with what they were, so reading the saved file at start isn't a change
+        let lastSettings = JSON.stringify(getSettings());
+        const stopWatchingSettings = jsonStorage.subscribe((_update, mode) => {
+            const now = JSON.stringify(getSettings());
+            const changed = now !== lastSettings;
+            lastSettings = now;
+            if (changed && mode !== JsonStorageUpdateMode.Load) invalidation.settingsChanged();
+        });
+        const { nums, label } = self.manifest.version;
+        const versionFile = getJsonStorage<{ version?: string; }>(
+            pluginStoragePathFor(PLUGIN_ID, "cache-version.json"),
+            { default: {} },
+        );
+        void invalidation.checkVersion(nums.join(".") + (label ? `-${label}` : ""), {
+            load: async () => (await versionFile.get())?.version,
+            save: version => void versionFile.set({ version }, true),
+        });
+
         cleanup(
             () => {
+                invalidation.stop();
+                stopWatchingSettings();
                 appState.remove();
                 clearPatches();
                 runtime.lowRes?.clear();
@@ -125,6 +164,11 @@ export default plugin<{ jsonStorage: Settings; }>({
             },
         );
         applyPatches(cleanup);
+    },
+
+    // Undoing the patches leaves Discord's GIF picker half patched until it's rebuilt: ask for a reload
+    stop({ plugin: self }) {
+        self.requireReload();
     },
 
     SettingsComponent,

@@ -39,6 +39,7 @@ Favourites saved from chat embeds sit behind Discord's media proxy. For Tenor, G
 ### GIF picker
 - **Favourites only (optional).** Hides Trending and the featured categories on the picker's main page. Search and Favorites stay.
 - **Faster GIF tab switch (mobile).** The GIF tab opens at once, and the picker is built right after, instead of the app freezing for a moment.
+- **Viewport buffer (mobile).** GIFs are prepared about three rows past the screen edge, so they don't pop in blank while you scroll. Discord's own list only prepares about one row.
 
 ### Favourites
 - **Export and import.** Save your favourites to a file (desktop) or the clipboard (mobile), and import them on another account. Import can **merge** into your favourites or **replace** them. Imports over Discord's favourites limit are refused.
@@ -47,6 +48,7 @@ Favourites saved from chat embeds sit behind Discord's media proxy. For Tenor, G
 ### Status and cache
 - **Patch status.** Settings show whether each of the plugin's hooks into Discord works. Discord changes its code often; when a hook stops matching, that part works like normal Discord, and this is where you'll see it.
 - **Cache stats and reset.** See what the plugin remembers and about how much memory it uses, and reset it. Its caches are bounded: a few MB of URLs, plus up to 24 MB of still frames on desktop.
+- **Cleared on changes.** Changing any GIFs+ setting, or updating to another version, clears what the plugin remembers, so nothing from the old settings or version sticks around. Discord's own image cache isn't touched.
 - **Theme colours.** Indicators and buttons use Discord's theme colours, so they fit light, dark and custom themes.
 
 ## Settings
@@ -63,6 +65,7 @@ Favourites saved from chat embeds sit behind Discord's media proxy. For Tenor, G
 | | Loading indicators | On |
 | GIF picker | Favourites only | Off |
 | | Faster GIF tab switch (mobile) | On |
+| | Viewport buffer (mobile) | On |
 | Favourites | Export, import and merge, import and replace | |
 | Status and cache | Patches, remembered GIFs (1000), cache stats, reset | |
 | | Restore default settings | |
@@ -96,7 +99,7 @@ Add this URL as a plugin repository in Valenced, then install **GIFs+** from it:
 https://thatkerimguy.github.io/KerimsPluginRepo/index.json
 ```
 
-Updates come through the same repository.
+Updates come through the same repository. Turning GIFs+ on or off asks Discord to reload, so the GIF picker is patched cleanly from the start.
 
 ### Test builds
 
@@ -144,7 +147,7 @@ Valenced plugins are built with the [Valenced plugin template](https://github.co
 
 - The files both builds share are edited in `vencord/gifPickerOptimizer` and copied with `node .github/scripts/sync-shared.mjs` (CI fails when they differ).
 - Tests and the checklist for trying a build in Discord: [TESTING.md](TESTING.md).
-- Releases: the `Publish Valenced repository` workflow publishes to GitHub Pages. It builds each plugin whose `manifest.json` version isn't published yet, so bump `version` in `valenced/gif-picker-optimizer/manifest.json` to release.
+- Releases: the `Publish Valenced repository` workflow publishes to GitHub Pages. It builds each plugin whose `manifest.json` version isn't published yet, so bump `version` in `valenced/gif-picker-optimizer/manifest.json` to release, and `PLUGIN_VERSION` in `vencord/gifPickerOptimizer/state.ts` to the same (a test checks; a new version clears the caches).
 - What changed and how it was checked: [CHANGELOG.md](CHANGELOG.md).
 
 ## About the code

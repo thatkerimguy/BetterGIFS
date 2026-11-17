@@ -5,6 +5,30 @@ the rules that came out of these entries are in CLAUDE.md; how to test is in
 TESTING.md. "Not tried in Discord / on a device" means only builds, type checks
 and tests ran.
 
+## 1.7.2 (2026-11-17)
+
+- Mobile: **Viewport buffer** setting (on by default): GIFs are prepared about three rows past the screen edge, so they don't pop in blank while you scroll.
+- Mobile: turning GIFs+ on or off asks for a reload, so the GIF picker is patched cleanly.
+- Mobile: right after Discord starts, the main page waits for your saved settings, so Favourites only applies from the first open; the other settings apply once they're read too.
+- Both: changing a GIFs+ setting or updating to another version clears what the plugin remembers.
+
+**Changed on 2026-11-17 (mobile: tiles popping in blank while scrolling; not tried on a device):**
+- User report: while scrolling, a whole tile (GIF and grey box) disappears and comes back. It happens with GIFs+ off too, so it's Discord's list: its MasonryFlashList only renders about one row past the screen edge (`drawDistance` = `GIF_PICKER_ITEM_ESIMTATED_HEIGHT`, 180) and recycles tiles as soon as they leave it, so tiles reach the screen before they're rendered.
+- `OptimizedResultsList` (viewport.tsx) now sets `drawDistance` to at least 540 px (`DRAW_DISTANCE`, three rows). Visible-first order still comes from `onViewableItemsChanged`, so the extra tiles only queue behind the on-screen ones.
+- It's a setting, **Viewport buffer** (mobile, GIF picker section, on by default; `viewportBuffer`). Off leaves Discord's draw distance alone.
+
+**Changed on 2026-11-17 (mobile: reload on enable / disable, settings read late; not tried on a device):**
+- User report: the plugin sometimes doesn't load correctly after turning it on, and right after Discord starts the GIF picker can open before Favourites only applies.
+- Turning GIFs+ on while Discord runs (`plugin.startedLate`) now asks for a reload (`requireReload()`, Valenced's "reload required" prompt) and starts nothing until then: Discord's GIF modules are already loaded and in use, so the patches only half applied. `stop` asks for a reload too, since undoing the patches leaves the picker half patched until it's rebuilt. Same pattern as Valenced's own no-track and user-badges plugins.
+- Settings read late: `jsonStorage` with `load: true` only creates the storage; the file is read in the background (`get()`), and until then `storage.cache` is undefined, so `getSettings()` / `useSettings()` returned the defaults (Favourites only off, Load one by one on with 3 at a time, cache size 1000). Now `start` applies the queue and cache settings again once the file is read (`whenSettingsLoaded`), and the main page shows an empty frame until then (`useSettingsLoaded`) instead of Discord's page with Trending.
+
+**Changed on 2026-11-17 (caches cleared on settings and version changes; not tried in Discord or on a device):**
+- The user asked for the GIF cache to be invalidated when plugin settings or the plugin version change. `invalidation.ts` (new, shared): `createCacheInvalidation` runs the build's `resetCaches` (loaded this session, seen, failed, search previews, Klipy and Tenor lookups, desktop still frames; Discord's image cache isn't touched).
+- Settings: desktop listens to every `plugins.GIFs+.*` change except `enabled`; mobile subscribes to its `jsonStorage` and compares the settings with the previous ones, so reading the saved file at start doesn't count. Several changes at once (Restore default settings) clear once.
+- Version: saved after a check (desktop DataStore `GifPickerOptimizer_cacheVersion` with `PLUGIN_VERSION` in state.ts, mobile `cache-version.json` with the manifest version). A different one, or none saved yet (the first start with this change), clears the caches once.
+- Desktop `cacheNumbers` / `resetCaches` moved from CacheSettings.tsx to `cacheStats.ts` (start needs them too).
+- Tests: 55 (new: changes at once clear once, nothing before start or after stop, version changed / same / first start, a check finishing after stop, desktop `PLUGIN_VERSION` equals the manifest version).
+
 ## 1.7.1 (2026-11-17)
 
 - Mobile: the loading spinner no longer stays for a moment after a GIF has appeared.
