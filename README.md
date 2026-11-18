@@ -7,7 +7,7 @@ Part of KerimsPluginRepo: Kerim's Plugins for Vencord and Valenced.
 ## Features
 
 ### Loading
-- **One by one, in reading order.** GIFs load left to right and top to bottom, a few at a time, and the next starts when one finishes. GIFs on screen go first. How many load at once is up to you: on desktop **Auto** picks 2 on slow connections and up to 6 on fast ones; on mobile the default is 3.
+- **Loading order and limit.** GIFs on screen go first, then left to right and top to bottom. By default every GIF starts at once, like Discord. You can limit it to 1–6 at a time (the next starts when one finishes); on desktop **Auto** picks 2 on slow connections and up to 6 on fast ones.
 - **Slow GIFs don't hold things up.** After a few seconds (10 by default) the next GIF starts, and the slow one keeps loading in the background.
 - **Loading indicators.** A tile waiting its turn shows a breathing dot. When it starts loading, the dot grows into a spinner, which becomes a progress line with a percentage once the size is known. GIFs you've loaded before show a small morphing shape instead.
 - **Remembers what loaded.** Scroll back and GIFs you've seen show at once from cache. GIFs loaded in the last two weeks go first after a restart, since they're usually still in Discord's cache. On mobile, GIFs still in the phone's image cache skip the wait entirely.
@@ -57,7 +57,7 @@ Favourites saved from chat embeds sit behind Discord's media proxy. For Tenor, G
 | | Small Klipy previews | On |
 | | Still favourites | Off |
 | Loading | Load one by one | On |
-| | GIFs at the same time | Auto (desktop), 3 (mobile) |
+| | GIFs at the same time | Discord's default (all at once) |
 | | On-screen GIFs first (desktop) | On |
 | | Skip slow GIFs after | 10 seconds |
 | | Loading indicators | On |

@@ -49,3 +49,13 @@ First, open the plugin's settings → **Patches**. Do what each "not seen yet" l
 7. Export to the clipboard, import with merge and replace.
 8. Settings: the groups read cleanly, tapping Preview size / GIFs at the same time / Skip slow GIFs after / Remembered GIFs lists the values under it, and turning off Load one by one hides the two loading rows.
 9. Put the app in the background and back after loading a few new GIFs, then force close it: after a restart, those GIFs count as seen.
+
+## Benchmarks (`tests/bench/`)
+
+Not run by CI (they download real GIFs). Results land in `tests/bench/results/` (not committed).
+
+- `node bench/collect.mjs`: builds `corpus.json` from Tenor's and Giphy's public search pages (Klipy is behind a Cloudflare check, so it isn't included).
+- `node --import ./register.mjs --experimental-transform-types --no-warnings bench/network.ts`: downloads every GIF at original, SD, S and XS through the plugin's own `rewriteUrl` (desktop mp4, desktop favourite .gif, mobile webp) and prints sizes and times. `--from <results file>` re-summarises a run.
+- `node bench/picker/server.mjs`, then open `http://localhost:8787/?rounds=5` (phone: `adb reverse tcp:8787 tcp:8787` and the same URL in Chrome): a 50-GIF masonry picker loaded Discord's way (everything at once, full size) and through the plugin's `LoadQueue` with S and XS previews. `node bench/report.mjs bench/results/picker-<date>.jsonl` gives medians. Run one device at a time: two on the same line skew each other.
+- In Discord, desktop: paste `bench/discord-probe.js` into the console, open the picker, search for something new, scroll, then `gpBench.stop()`. Once with GIFs+ on, once off.
+- In Discord, Android: open the GIF picker, run `node bench/mobile-probe.mjs <label>`, submit a new search when it asks. It scrolls by itself and records frames (`gfxinfo`) and bytes. Once with GIFs+ on, once off.

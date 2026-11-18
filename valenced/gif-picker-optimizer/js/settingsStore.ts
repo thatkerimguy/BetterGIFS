@@ -26,7 +26,8 @@ export const DefaultSettings: Settings = {
     // on tiles about 540 device px wide.
     quality: "s",
     sequential: true,
-    concurrency: 3,
+    // Discord's own loading, no limit (CONCURRENCY_DISCORD; 3 before 1.7.4)
+    concurrency: -1,
     loadTimeout: 10,
     showProgress: true,
     klipyLookup: true,

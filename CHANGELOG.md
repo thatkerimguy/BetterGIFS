@@ -5,6 +5,18 @@ the rules that came out of these entries are in CLAUDE.md; how to test is in
 TESTING.md. "Not tried in Discord / on a device" means only builds, type checks
 and tests ran.
 
+## 1.7.4 (2026-11-19)
+
+- Fixed: Giphy GIFs at preview size **SD** never loaded (they ended with the hollow ring). Giphy has no animated 480 px version; SD now uses Giphy's full size webp, still about a quarter of the .gif a favourite stores.
+- **GIFs at the same time** has a new first choice, **Discord's default: all at once**, and it's the default on desktop and mobile: no limit, every GIF starts as soon as its tile shows, like Discord. Previews, on-screen-first order and the cache still apply. The limits (Auto on desktop, 1–6) are still there. Installs that already saved a value keep it; Restore default settings switches to the new default.
+- Benchmarks in `tests/bench/` (see TESTING.md).
+
+**Changed on 2026-11-19:**
+- Giphy: `GIPHY_CODES.sd.image` `480w` → `giphy`. `480w.webp` / `480w.gif` return 403 for every GIF (64 of 64 checked); only the `480w_s.jpg` still exists. The new SD URL loaded for 63 of 64 (the other GIF lacks most renditions) at 32.7 MB vs 122 MB for the original .gifs. Unit test: no Giphy rewrite asks for 480w.
+- Concurrency: `CONCURRENCY_DISCORD` in settingsText.ts (value -1, 64 slots, the same as "Load one by one" off). Desktop `loadConcurrency` maps -1 to it and 0 to Auto (`isAutoConcurrency` is now `=== 0`); mobile `applyQueueSettings` uses it for anything below 1. The user's call: Discord's own loading as the default instead of a limit the plugin sets.
+- Benchmarks (2026-11-18, Tenor and Giphy only; Klipy is behind a Cloudflare check): `network.ts` (sizes per preview size through `rewriteUrl`), a picker simulation with the real `LoadQueue` in a browser and in Chrome on an Android phone, and in-Discord probes (`discord-probe.js`, `mobile-probe.mjs`).
+- Checks: unit tests, shared files in sync. Not tried in Discord / on a device.
+
 ## 1.7.3 (2026-11-18)
 
 - Removed **Favourites only** (desktop and mobile) and **Viewport buffer** (mobile). The GIF picker's main page and list are Discord's own again. They may come back later in a separate plugin.

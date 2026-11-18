@@ -11,7 +11,7 @@ import { Alerts } from "@webpack/common";
 import { CacheSettings, PatchesSettings } from "./CacheSettings";
 import type { Quality } from "./lowres";
 import { SettingsHeader } from "./SettingsHeader";
-import { QUALITY_CHOICES, RESTORE_DEFAULTS_CONFIRM, SECTIONS, type SectionText, TEXT } from "./settingsText";
+import { CONCURRENCY_DISCORD, QUALITY_CHOICES, RESTORE_DEFAULTS_CONFIRM, SECTIONS, type SectionText, TEXT } from "./settingsText";
 import { cl, loadedThisSession, queue, settingsPanels } from "./state";
 
 /** "800", "1.2K", "3K": four digit marker labels are too wide and wrap under the slider */
@@ -71,7 +71,8 @@ export const settings = definePluginSettings({
                 : TEXT.concurrency.description;
         },
         options: [
-            { label: "Auto: from your connection's speed", value: 0, default: true },
+            { label: CONCURRENCY_DISCORD.label, value: CONCURRENCY_DISCORD.value, default: true },
+            { label: "Auto: from your connection's speed", value: 0 },
             ...makeRange(1, 6, 1).map(n => ({ label: n === 1 ? "1: strictly one by one" : String(n), value: n })),
         ],
         hidden: notSequential,
@@ -173,7 +174,7 @@ function isAutoQuality(): boolean {
 }
 
 function isAutoConcurrency(): boolean {
-    return !((settings.store.concurrency ?? 0) >= 1);
+    return Math.round(settings.store.concurrency ?? CONCURRENCY_DISCORD.value) === 0;
 }
 
 /** Whether GIFs load one by one (a function, so the settings above can refer to it before `settings` exists) */
@@ -230,8 +231,12 @@ export function applyQueueSettings() {
     queue.kick();
 }
 
-/** How many GIFs may load at the same time: the setting, or `autoConcurrency()` when it's Auto (0) */
+/**
+ * How many GIFs may load at the same time: the setting, `autoConcurrency()` when
+ * it's Auto (0), no limit for Discord's default (-1).
+ */
 export function loadConcurrency(setting: number | undefined = settings.store.concurrency): number {
-    const n = Math.round(setting ?? 0);
-    return n >= 1 ? n : autoConcurrency();
+    const n = Math.round(setting ?? CONCURRENCY_DISCORD.value);
+    if (n >= 1) return n;
+    return n === 0 ? autoConcurrency() : CONCURRENCY_DISCORD.slots;
 }

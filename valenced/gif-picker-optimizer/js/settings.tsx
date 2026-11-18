@@ -22,7 +22,7 @@ import { FavoritesSection } from "./favoritesSettings";
 import type { Quality } from "./lowres";
 import type { Settings } from "./settingsStore";
 import { cacheControl, DefaultSettings } from "./settingsStore";
-import { cacheStatRows, cacheSummary, QUALITY_CHOICES, RESTORE_DEFAULTS_CONFIRM, SECTIONS, TEXT } from "./settingsText";
+import { cacheStatRows, cacheSummary, CONCURRENCY_DISCORD, QUALITY_CHOICES, RESTORE_DEFAULTS_CONFIRM, SECTIONS, TEXT } from "./settingsText";
 import { applyQueueSettings } from "./state";
 
 interface Choice<T> {
@@ -35,11 +35,14 @@ interface Choice<T> {
 const QUALITIES: Choice<Quality>[] = QUALITY_CHOICES
     .filter(c => c.value !== "auto")
     .map(c => ({ value: c.value as Quality, label: c.label, detail: c.detail }));
-const CONCURRENCIES: Choice<number>[] = [1, 2, 3, 4, 6].map(n => ({
-    value: n,
-    label: `${n} at a time`,
-    detail: n === 1 ? "Strictly one by one" : n === DefaultSettings.concurrency ? "Default" : undefined,
-}));
+const CONCURRENCIES: Choice<number>[] = [
+    { value: CONCURRENCY_DISCORD.value, label: CONCURRENCY_DISCORD.label, detail: "Default" },
+    ...[1, 2, 3, 4, 6].map(n => ({
+        value: n,
+        label: `${n} at a time`,
+        detail: n === 1 ? "Strictly one by one" : undefined,
+    })),
+];
 const TIMEOUTS: Choice<number>[] = [5, 10, 20, 30].map(s => ({
     value: s,
     label: `${s} seconds`,

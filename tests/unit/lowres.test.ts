@@ -21,7 +21,9 @@ test("Tenor: size code in the media id, same media type unless imagesOnly", () =
 });
 
 test("Giphy renditions", () => {
-    assert.equal(rewriteUrl("https://media.giphy.com/media/v1.Y2lk/ABC123/giphy.gif", "sd"), "https://media.giphy.com/media/ABC123/480w.webp");
+    assert.equal(rewriteUrl("https://media.giphy.com/media/v1.Y2lk/ABC123/giphy.gif", "sd"), "https://media.giphy.com/media/ABC123/giphy.webp");
+    // There is no animated 480w on Giphy (403)
+    for (const q of ["xs", "s", "sd"] as const) assert.doesNotMatch(rewriteUrl("https://media.giphy.com/media/ABC123/giphy.gif", q)!, /480w/);
     assert.equal(rewriteUrl("https://media.giphy.com/media/ABC123/giphy.mp4", "xs"), "https://media.giphy.com/media/ABC123/100w.mp4");
 });
 

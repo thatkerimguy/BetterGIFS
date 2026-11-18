@@ -24,6 +24,13 @@ export interface SettingText {
     description: string;
 }
 
+/**
+ * The "GIFs at the same time" choice that keeps Discord's own loading: no limit,
+ * every GIF starts as soon as its tile shows (the default since 1.7.4). The order
+ * and previews still apply.
+ */
+export const CONCURRENCY_DISCORD = { value: -1, label: "Discord's default: all at once", slots: 64 } as const;
+
 export const TEXT = {
     quality: { title: "Preview size", description: "S suits most screens." },
     klipyLookup: { title: "Small Klipy previews", description: "Klipy is Discord's GIF source. Its small versions need one extra request per search page." },

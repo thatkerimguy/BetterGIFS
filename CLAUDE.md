@@ -1,5 +1,7 @@
 # KerimsPluginRepo — handoff notes
 
+Second project in this repo: **Social Embeds** (app-like X / Reddit / TikTok / Instagram widgets) and **Chat Islands** (a Valenced library for React views inside mobile chat). Its plan, structure and rules are in `SOCIAL_EMBEDS_PLAN.md`, and where testing stands in `SOCIAL_EMBEDS_HANDOFF.md`; read those before working on `valenced/chat-islands/`, `valenced/social-embeds/` or `vencord/socialEmbeds/`. Everything below is about GIFs+.
+
 GIFs+ (called GifPickerOptimizer before 1.6.0): a Discord GIF picker plugin with two builds. The Vencord plugin name is `GIFs+` (Vencord has a built-in `BetterGifPicker`; `migratePluginSettings` moves the old `GifPickerOptimizer` settings). The Valenced id stays `thatkerimguy.gif-picker-optimizer`, its manifest name is `GIFs+`. Source folder names and DataStore keys keep the old names.
 
 - `vencord/gifPickerOptimizer/`: Vencord user plugin for desktop and web. **This is the one being installed and tested now.**
@@ -117,7 +119,7 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 - `hold()` keeps Klipy search tiles (`waitsForLowRes`) waiting while the small versions of their results page are in flight (3-second cap), so they don't start the full-size files meanwhile. Other tiles (Tenor, Discord links, favourites) carry on. With the early request (below) it only holds for whatever is still in flight when Discord's results arrive, and only for what's left of 3 s since the request started.
 - Load timeout: the slot goes to the next GIF (`release`) and the slow one keeps downloading as overtime. Overtime plus active downloads are capped at 2 × `concurrency` (overtime entries stop counting after 60 s).
 - Cache fast lane: `finish(ticket, loadMs)` reports load times. While seen-before (`seenBefore`) GIFs load in ≤ 150 ms (they come from the cache), up to 8 of them may run past the limit. One taking ≥ 400 ms, or timing out, closes the lane: the cache had dropped it, so it really downloaded (the problem precaching had).
-- Concurrency (desktop): a dropdown (Auto, 1–6; a slider's "Auto" marker label wrapped), 0 = **Auto** (default for new installs): `navigator.connection` → 2 on `slow-2g`/`2g`/`3g` or `saveData`, 6 on `4g` with `downlink >= 5`, 4 with `downlink >= 2`, else 3 (also when the API is missing). `loadConcurrency()` in `settings.tsx`. Vencord writes a default into settings the first time it's read, so existing installs keep their stored 3. Mobile has no such API: 3 by default.
+- Concurrency: the default (both builds, since 1.7.4, the user's call) is **Discord's default** (-1, `CONCURRENCY_DISCORD` in settingsText.ts): no limit (64 slots, same as Load one by one off). Desktop dropdown: Discord's default, Auto, 1–6 (a slider's "Auto" marker label wrapped); 0 = **Auto**: `navigator.connection` → 2 on `slow-2g`/`2g`/`3g` or `saveData`, 6 on `4g` with `downlink >= 5`, 4 with `downlink >= 2`, else 3 (also when the API is missing). `loadConcurrency()` in `settings.tsx`. Vencord writes a default into settings the first time it's read, so existing installs keep their stored value. Mobile has no such API (Discord's default, 1, 2, 3, 4, 6; was 3 by default).
 
 ### Low-res sources
 
@@ -135,7 +137,7 @@ Discord's "add favourite" action stores the item's `src`. Sending uses `item.url
 | Source | Rewrite |
 |---|---|
 | Tenor | Last two characters of the media id: image `A2`/`A1`/`Ax` (nano/tiny/full webp, all animated; `A5` is a static frame), video `P2`/`P1`/`P1` (nano/tiny mp4; `P3` is tinywebm). Checked against Tenor's API 2026-11. |
-| Giphy | `100w` / `200w` / `480w` |
+| Giphy | `100w` / `200w` / `giphy` (full size webp: there is no animated 480w) |
 | cdn/media.discordapp.net and images-ext (vx/fx/twitter embeds) | Discord media proxy with `width`, `height`, `format=webp`, `animated=true` |
 | pbs.twimg.com | `name=` parameter |
 
@@ -191,7 +193,7 @@ A preview is only used if it's the same media type as the original (video stays 
 |---|---|
 | quality (`xs`/`s`/`sd`/`original`) | `s` |
 | sequential | on |
-| concurrency | Auto (0) for new installs; existing installs keep their stored value (was 3, 1 before 1.3.1) |
+| concurrency | Discord's default (-1, no limit) since 1.7.4; existing installs keep their stored value (Auto before, 3 before that, 1 before 1.3.1) |
 | prioritizeVisible | on |
 | loadTimeout | 10 s |
 | showProgress | on |
@@ -200,7 +202,7 @@ A preview is only used if it's the same media type as the original (video stays 
 | stillFavorites | off |
 | fastTabSwitch (mobile only) | on |
 
-Desktop quality also has `auto` (S, or SD at `devicePixelRatio >= 2`), not the default. Mobile defaults are the same except concurrency 3 (no Auto), and no `prioritizeVisible` (always on). Mobile quality is `s` (was `xs` before the 1.6.0 follow-up).
+Desktop quality also has `auto` (S, or SD at `devicePixelRatio >= 2`), not the default. Mobile defaults are the same (no Auto concurrency), and no `prioritizeVisible` (always on). Mobile quality is `s` (was `xs` before the 1.6.0 follow-up).
 
 ## Suggested next steps
 

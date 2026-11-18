@@ -30,11 +30,13 @@ const TENOR_CODES = {
     sd: { image: "Ax", video: "P1" },
 } as const;
 
-// Giphy rendition names
+// Giphy rendition names. Nothing sits between 200w and full size: there is no
+// animated 480w (403 for every GIF, checked 2026-11-19; only the 480w_s.jpg still),
+// so SD images use the full size webp, still far smaller than the .gif favourites store.
 const GIPHY_CODES = {
     xs: { image: "100w", video: "100w" },
     s: { image: "200w", video: "200w" },
-    sd: { image: "480w", video: "200w" },
+    sd: { image: "giphy", video: "200w" },
 } as const;
 
 // Twitter / X (pbs.twimg.com) — used by vx/fx/twitter embeds

@@ -9,6 +9,7 @@ import type { KlipyResolver } from "./klipyLookups";
 import type { LowResPages } from "./lowResPages";
 import type { Settings } from "./settingsStore";
 import { DefaultSettings } from "./settingsStore";
+import { CONCURRENCY_DISCORD } from "./settingsText";
 import type { TenorPageResolver } from "./tenor";
 import { createTracking } from "./tracking";
 
@@ -45,7 +46,8 @@ export const {
 
 /** Sets the load queue from the settings (on start and when they change, not per tile) */
 export function applyQueueSettings({ sequential, concurrency }: Settings) {
-    queue.concurrency = sequential ? concurrency : 64;
+    // Discord's default (-1) and "Load one by one" off: no limit
+    queue.concurrency = sequential && concurrency >= 1 ? concurrency : CONCURRENCY_DISCORD.slots;
     queue.prioritizeVisible = true;
     queue.kick();
 }
