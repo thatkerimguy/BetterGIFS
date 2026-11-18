@@ -9,7 +9,7 @@
       "author": "thatkerimguy (https://github.com/thatkerimguy \"GitHub\")",
       "icon": "GifIcon",
       "channels": {
-        "latest": "1.7.2"
+        "latest": "1.7.3"
       },
       "versions": {
         "1.1.0": {
@@ -172,6 +172,19 @@
           "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.7.2.zip",
           "sha256": "d4060817c3f8c5b74a4d35f48658798ea8a7b23b87a57e1450c58d4cfce9f89d",
           "size": 21962,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        },
+        "1.7.3": {
+          "url": "https://thatkerimguy.github.io/KerimsPluginRepo/pool/thatkerimguy.gif-picker-optimizer@1.7.3.zip",
+          "sha256": "6719051851245667227a4a5097ea2971d711b90c81aa3366efa52175d31d6761",
+          "size": 21125,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
